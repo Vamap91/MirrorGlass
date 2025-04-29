@@ -12,6 +12,7 @@ from skimage.feature import ORB, match_descriptors
 from skimage.color import rgb2gray
 import pandas as pd
 import time
+import cv2
 
 # Configuração da página Streamlit
 st.set_page_config(
@@ -38,9 +39,9 @@ mesmo com pequenas alterações como cortes, ajustes de brilho ou espelhamento.
 st.sidebar.header("⚙️ Configurações")
 limiar_similaridade = st.sidebar.slider(
     "Limiar de Similaridade (%)", 
-    min_value=50, 
+    min_value=30, 
     max_value=100, 
-    value=70, 
+    value=50, 
     help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
 )
 limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
@@ -48,23 +49,26 @@ limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
 # Método de detecção
 metodo_deteccao = st.sidebar.selectbox(
     "Método de Detecção",
-    ["Combinado (recomendado)", "SSIM", "Detector de características (ORB)"],
+    ["SIFT (melhor para recortes)", "SSIM + SIFT", "SSIM"],
     help="Escolha o método para detectar imagens similares"
 )
 
 # Funções para processamento de imagens
-def preprocessar_imagem(img, tamanho=(224, 224)):
+def preprocessar_imagem(img, tamanho=(300, 300)):
     """Pré-processa uma imagem para análise"""
     try:
         # Redimensionar
         img_resize = img.resize(tamanho)
-        # Converter para escala de cinza para simplificar a comparação
+        # Converter para escala de cinza para SSIM
         img_gray = img_resize.convert('L')
         # Converter para array numpy
         img_array = np.array(img_gray)
         # Normalizar valores para [0, 1]
         img_array = img_array / 255.0
-        return img_array, np.array(img_resize)
+        # Converter para CV2 formato (para SIFT)
+        img_cv = np.array(img_resize)
+        img_cv = img_cv[:, :, ::-1].copy()  # RGB para BGR
+        return img_array, img_cv
     except Exception as e:
         st.error(f"Erro ao processar imagem: {e}")
         return None, None
@@ -77,69 +81,82 @@ def calcular_similaridade_ssim(img1, img2):
             img2 = resize(img2, img1.shape)
         
         # Calcular SSIM com data_range especificado
-        # As imagens são normalizadas para [0, 1], então o data_range é 1.0
         score = ssim(img1, img2, data_range=1.0)
         return score
     except Exception as e:
         st.error(f"Erro ao calcular similaridade SSIM: {e}")
         return 0
 
-def calcular_similaridade_orb(img1_color, img2_color):
+def calcular_similaridade_sift(img1_cv, img2_cv):
     """
-    Calcula a similaridade entre duas imagens usando o detector de características ORB
+    Calcula a similaridade entre duas imagens usando SIFT
     Este método é mais robusto para detectar imagens recortadas
     """
     try:
         # Converter para escala de cinza
-        img1 = rgb2gray(img1_color)
-        img2 = rgb2gray(img2_color)
+        img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+        img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
         
-        # Inicializar o detector ORB
-        orb = ORB(n_keypoints=100)
+        # Inicializar o detector SIFT
+        sift = cv2.SIFT_create()
         
-        # Extrair características da primeira imagem
-        orb.detect_and_extract(img1)
-        keypoints1 = orb.keypoints
-        descriptors1 = orb.descriptors
+        # Detectar keypoints e descritores
+        kp1, des1 = sift.detectAndCompute(img1_gray, None)
+        kp2, des2 = sift.detectAndCompute(img2_gray, None)
         
-        # Extrair características da segunda imagem
-        orb.detect_and_extract(img2)
-        keypoints2 = orb.keypoints
-        descriptors2 = orb.descriptors
-        
-        # Se não for possível extrair características, retorna 0
-        if descriptors1 is None or descriptors2 is None or len(descriptors1) == 0 or len(descriptors2) == 0:
-            return 0
-        
-        # Encontrar correspondências entre as características
-        matches = match_descriptors(descriptors1, descriptors2, cross_check=True)
-        
-        # Calcular a similaridade baseada no número de correspondências
-        # em relação ao número total de pontos-chave
-        max_keypoints = max(len(keypoints1), len(keypoints2))
-        if max_keypoints == 0:
+        # Se não houver descritores suficientes, retorna 0
+        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
             return 0
             
-        # A similaridade é a proporção de correspondências
-        similarity = len(matches) / max_keypoints
+        # Usar o matcher FLANN
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
         
-        return similarity
+        # Encontrar os 2 melhores matches para cada descritor
+        matches = flann.knnMatch(des1, des2, k=2)
+        
+        # Filtrar bons matches usando o teste de proporção de Lowe
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:
+                good_matches.append(m)
+        
+        # Calcular a similaridade baseada no número de bons matches
+        max_matches = min(len(kp1), len(kp2))
+        if max_matches == 0:
+            return 0
+            
+        similarity = len(good_matches) / max_matches
+        
+        # Normalizar para evitar valores muito baixos
+        # Valores abaixo de 0.05 são improváveis para imagens relacionadas
+        # Transformamos para uma escala mais intuitiva
+        if similarity < 0.05:
+            adjusted_similarity = 0
+        else:
+            # Expandir valores pequenos para uma escala mais ampla
+            adjusted_similarity = min(1.0, similarity * 2)
+        
+        return adjusted_similarity
+        
     except Exception as e:
-        st.error(f"Erro ao calcular similaridade ORB: {e}")
+        st.error(f"Erro ao calcular similaridade SIFT: {e}")
         return 0
 
-def calcular_similaridade_combinada(img1_gray, img2_gray, img1_color, img2_color):
+def calcular_similaridade_combinada(img1_gray, img2_gray, img1_cv, img2_cv):
     """
-    Combina os métodos SSIM e ORB para obter uma detecção mais robusta
+    Combina os métodos SSIM e SIFT para obter uma detecção mais robusta
     """
     try:
         # Calcular similaridade usando ambos os métodos
         sim_ssim = calcular_similaridade_ssim(img1_gray, img2_gray)
-        sim_orb = calcular_similaridade_orb(img1_color, img2_color)
+        sim_sift = calcular_similaridade_sift(img1_cv, img2_cv)
         
-        # A similaridade combinada é o máximo dos dois valores
-        # Isso permite detectar duplicatas mesmo que apenas um dos métodos tenha sucesso
-        return max(sim_ssim, sim_orb)
+        # A similaridade combinada é a média ponderada dos dois valores
+        # SIFT tem mais peso para detectar recortes
+        return (sim_ssim * 0.3) + (sim_sift * 0.7)
     except Exception as e:
         st.error(f"Erro ao calcular similaridade combinada: {e}")
         return 0
@@ -204,7 +221,7 @@ def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
     return None
 
 # Função principal para detectar duplicatas
-def detectar_duplicatas(imagens, nomes, limiar=0.7, metodo="Combinado (recomendado)"):
+def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT (melhor para recortes)"):
     """Detecta duplicatas entre as imagens carregadas"""
     # Mostrar progresso
     progress_bar = st.progress(0)
@@ -213,7 +230,7 @@ def detectar_duplicatas(imagens, nomes, limiar=0.7, metodo="Combinado (recomenda
     # Processar imagens
     status_text.text("Extraindo características das imagens...")
     arrays_processados_gray = []  # Para SSIM
-    arrays_processados_color = []  # Para ORB
+    arrays_processados_cv = []    # Para SIFT
     indices_validos = []
     
     for i, img in enumerate(imagens):
@@ -223,10 +240,10 @@ def detectar_duplicatas(imagens, nomes, limiar=0.7, metodo="Combinado (recomenda
         status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
         
         # Preprocessar imagem
-        img_array_gray, img_array_color = preprocessar_imagem(img)
+        img_array_gray, img_array_cv = preprocessar_imagem(img)
         if img_array_gray is not None:
             arrays_processados_gray.append(img_array_gray)
-            arrays_processados_color.append(img_array_color)
+            arrays_processados_cv.append(img_array_cv)
             indices_validos.append(i)
     
     if not arrays_processados_gray:
@@ -259,17 +276,17 @@ def detectar_duplicatas(imagens, nomes, limiar=0.7, metodo="Combinado (recomenda
                         arrays_processados_gray[i], 
                         arrays_processados_gray[j]
                     )
-                elif metodo == "Detector de características (ORB)":
-                    similaridade = calcular_similaridade_orb(
-                        arrays_processados_color[i], 
-                        arrays_processados_color[j]
+                elif metodo == "SIFT (melhor para recortes)":
+                    similaridade = calcular_similaridade_sift(
+                        arrays_processados_cv[i], 
+                        arrays_processados_cv[j]
                     )
-                else:  # Combinado (padrão)
+                else:  # SSIM + SIFT
                     similaridade = calcular_similaridade_combinada(
                         arrays_processados_gray[i], 
                         arrays_processados_gray[j],
-                        arrays_processados_color[i], 
-                        arrays_processados_color[j]
+                        arrays_processados_cv[i], 
+                        arrays_processados_cv[j]
                     )
                 
                 # Se acima do limiar, adicionar como duplicata
@@ -365,7 +382,8 @@ st.write("""
 - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
 - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
 - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
-- **Similaridade <50%**: Provavelmente não são duplicatas
+- **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
+- **Similaridade <30%**: Provavelmente não são duplicatas
 """)
 
 # Contato e informações
