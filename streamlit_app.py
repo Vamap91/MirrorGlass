@@ -9,7 +9,7 @@ import tensorflow as tf
 from tensorflow.keras.preprocessing import image
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 import faiss
-from tqdm import tqdm
+# Removida dependência de tqdm
 import pickle
 import time
 import pandas as pd
@@ -167,6 +167,7 @@ def detectar_duplicatas(imagens, nomes, limiar=0.9):
     processados = []
     
     for i, img in enumerate(imagens):
+        # Atualizar barra de progresso
         progress = (i + 1) / len(imagens)
         progress_bar.progress(progress)
         status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
@@ -194,6 +195,7 @@ def detectar_duplicatas(imagens, nomes, limiar=0.9):
     duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
     
     for i, idx in enumerate(processados):
+        # Atualizar progresso
         progress = (i + 1) / len(processados)
         progress_bar.progress(progress)
         
