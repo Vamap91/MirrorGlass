@@ -8,6 +8,8 @@ import base64
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import resize
 from skimage import img_as_float
+from skimage.feature import ORB, match_descriptors
+from skimage.color import rgb2gray
 import pandas as pd
 import time
 
@@ -27,7 +29,7 @@ mesmo com pequenas alterações como cortes, ajustes de brilho ou espelhamento.
 
 ### Como funciona?
 1. Faça upload das imagens para análise
-2. O sistema extrai características das imagens
+2. O sistema extrai características das imagens usando múltiplos métodos
 3. Automaticamente compara as imagens entre si
 4. Identifica possíveis duplicatas baseadas no limiar de similaridade definido
 """)
@@ -36,12 +38,19 @@ mesmo com pequenas alterações como cortes, ajustes de brilho ou espelhamento.
 st.sidebar.header("⚙️ Configurações")
 limiar_similaridade = st.sidebar.slider(
     "Limiar de Similaridade (%)", 
-    min_value=70, 
+    min_value=50, 
     max_value=100, 
-    value=80, 
+    value=70, 
     help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
 )
 limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
+
+# Método de detecção
+metodo_deteccao = st.sidebar.selectbox(
+    "Método de Detecção",
+    ["Combinado (recomendado)", "SSIM", "Detector de características (ORB)"],
+    help="Escolha o método para detectar imagens similares"
+)
 
 # Funções para processamento de imagens
 def preprocessar_imagem(img, tamanho=(224, 224)):
@@ -55,12 +64,12 @@ def preprocessar_imagem(img, tamanho=(224, 224)):
         img_array = np.array(img_gray)
         # Normalizar valores para [0, 1]
         img_array = img_array / 255.0
-        return img_array
+        return img_array, np.array(img_resize)
     except Exception as e:
         st.error(f"Erro ao processar imagem: {e}")
-        return None
+        return None, None
 
-def calcular_similaridade(img1, img2):
+def calcular_similaridade_ssim(img1, img2):
     """Calcula a similaridade entre duas imagens usando SSIM"""
     try:
         # Garantir que as imagens tenham o mesmo tamanho
@@ -72,7 +81,67 @@ def calcular_similaridade(img1, img2):
         score = ssim(img1, img2, data_range=1.0)
         return score
     except Exception as e:
-        st.error(f"Erro ao calcular similaridade: {e}")
+        st.error(f"Erro ao calcular similaridade SSIM: {e}")
+        return 0
+
+def calcular_similaridade_orb(img1_color, img2_color):
+    """
+    Calcula a similaridade entre duas imagens usando o detector de características ORB
+    Este método é mais robusto para detectar imagens recortadas
+    """
+    try:
+        # Converter para escala de cinza
+        img1 = rgb2gray(img1_color)
+        img2 = rgb2gray(img2_color)
+        
+        # Inicializar o detector ORB
+        orb = ORB(n_keypoints=100)
+        
+        # Extrair características da primeira imagem
+        orb.detect_and_extract(img1)
+        keypoints1 = orb.keypoints
+        descriptors1 = orb.descriptors
+        
+        # Extrair características da segunda imagem
+        orb.detect_and_extract(img2)
+        keypoints2 = orb.keypoints
+        descriptors2 = orb.descriptors
+        
+        # Se não for possível extrair características, retorna 0
+        if descriptors1 is None or descriptors2 is None or len(descriptors1) == 0 or len(descriptors2) == 0:
+            return 0
+        
+        # Encontrar correspondências entre as características
+        matches = match_descriptors(descriptors1, descriptors2, cross_check=True)
+        
+        # Calcular a similaridade baseada no número de correspondências
+        # em relação ao número total de pontos-chave
+        max_keypoints = max(len(keypoints1), len(keypoints2))
+        if max_keypoints == 0:
+            return 0
+            
+        # A similaridade é a proporção de correspondências
+        similarity = len(matches) / max_keypoints
+        
+        return similarity
+    except Exception as e:
+        st.error(f"Erro ao calcular similaridade ORB: {e}")
+        return 0
+
+def calcular_similaridade_combinada(img1_gray, img2_gray, img1_color, img2_color):
+    """
+    Combina os métodos SSIM e ORB para obter uma detecção mais robusta
+    """
+    try:
+        # Calcular similaridade usando ambos os métodos
+        sim_ssim = calcular_similaridade_ssim(img1_gray, img2_gray)
+        sim_orb = calcular_similaridade_orb(img1_color, img2_color)
+        
+        # A similaridade combinada é o máximo dos dois valores
+        # Isso permite detectar duplicatas mesmo que apenas um dos métodos tenha sucesso
+        return max(sim_ssim, sim_orb)
+    except Exception as e:
+        st.error(f"Erro ao calcular similaridade combinada: {e}")
         return 0
 
 def get_csv_download_link(df, filename, text):
@@ -97,7 +166,7 @@ def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
         st.subheader(f"Grupo de Duplicatas #{idx+1}")
         
         # Layout para imagem original e suas duplicatas
-        cols = st.columns(len(similares) + 1)
+        cols = st.columns(min(len(similares) + 1, 4))  # Limita a 4 colunas por linha
         
         # Mostrar imagem original
         with cols[0]:
@@ -105,7 +174,14 @@ def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
         
         # Mostrar duplicatas
         for i, (similar_idx, similaridade) in enumerate(similares):
-            with cols[i+1]:
+            col_index = (i + 1) % len(cols)
+            
+            # Se precisar de uma nova linha
+            if col_index == 0 and i > 0:
+                st.write("")  # Linha em branco
+                cols = st.columns(min(len(similares) - i + 1, 4))
+            
+            with cols[col_index]:
                 st.image(imagens[similar_idx], width=200)
                 caption = f"{nomes[similar_idx]}\nSimilaridade: {similaridade:.2f}"
                 st.caption(caption)
@@ -128,15 +204,16 @@ def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
     return None
 
 # Função principal para detectar duplicatas
-def detectar_duplicatas(imagens, nomes, limiar=0.8):
+def detectar_duplicatas(imagens, nomes, limiar=0.7, metodo="Combinado (recomendado)"):
     """Detecta duplicatas entre as imagens carregadas"""
     # Mostrar progresso
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     # Processar imagens
-    status_text.text("Processando imagens...")
-    arrays_processados = []
+    status_text.text("Extraindo características das imagens...")
+    arrays_processados_gray = []  # Para SSIM
+    arrays_processados_color = []  # Para ORB
     indices_validos = []
     
     for i, img in enumerate(imagens):
@@ -146,12 +223,13 @@ def detectar_duplicatas(imagens, nomes, limiar=0.8):
         status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
         
         # Preprocessar imagem
-        img_array = preprocessar_imagem(img)
-        if img_array is not None:
-            arrays_processados.append(img_array)
+        img_array_gray, img_array_color = preprocessar_imagem(img)
+        if img_array_gray is not None:
+            arrays_processados_gray.append(img_array_gray)
+            arrays_processados_color.append(img_array_color)
             indices_validos.append(i)
     
-    if not arrays_processados:
+    if not arrays_processados_gray:
         status_text.error("Nenhuma imagem válida para processamento.")
         return None
     
@@ -159,12 +237,12 @@ def detectar_duplicatas(imagens, nomes, limiar=0.8):
     status_text.text("Comparando imagens e buscando duplicatas...")
     duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
     
-    total_comparacoes = len(arrays_processados) * (len(arrays_processados) - 1) // 2
+    total_comparacoes = len(arrays_processados_gray) * (len(arrays_processados_gray) - 1) // 2
     comparacao_atual = 0
     
-    for i in range(len(arrays_processados)):
+    for i in range(len(arrays_processados_gray)):
         similares = []
-        for j in range(len(arrays_processados)):
+        for j in range(len(arrays_processados_gray)):
             # Não comparar uma imagem com ela mesma
             if i != j:
                 comparacao_atual += 1
@@ -175,8 +253,24 @@ def detectar_duplicatas(imagens, nomes, limiar=0.8):
                     progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
                     progress_bar.progress(progress)
                 
-                # Calcular similaridade
-                similaridade = calcular_similaridade(arrays_processados[i], arrays_processados[j])
+                # Calcular similaridade com base no método selecionado
+                if metodo == "SSIM":
+                    similaridade = calcular_similaridade_ssim(
+                        arrays_processados_gray[i], 
+                        arrays_processados_gray[j]
+                    )
+                elif metodo == "Detector de características (ORB)":
+                    similaridade = calcular_similaridade_orb(
+                        arrays_processados_color[i], 
+                        arrays_processados_color[j]
+                    )
+                else:  # Combinado (padrão)
+                    similaridade = calcular_similaridade_combinada(
+                        arrays_processados_gray[i], 
+                        arrays_processados_gray[j],
+                        arrays_processados_color[i], 
+                        arrays_processados_color[j]
+                    )
                 
                 # Se acima do limiar, adicionar como duplicata
                 if similaridade >= limiar:
@@ -218,7 +312,7 @@ if uploaded_files:
         
         # Detectar duplicatas
         try:
-            duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade)
+            duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade, metodo_deteccao)
             
             # Visualizar resultados
             if duplicatas:
@@ -241,7 +335,7 @@ if uploaded_files:
                     st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
                                                     "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
             else:
-                st.info("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+                st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
         except Exception as e:
             st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
 else:
@@ -268,10 +362,10 @@ st.markdown("---")
 st.markdown("### Como interpretar os resultados")
 st.write("""
 - **Similaridade 100%**: Imagens idênticas
-- **Similaridade >95%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
-- **Similaridade 90-95%**: Muito semelhantes (potenciais duplicatas)
-- **Similaridade 80-90%**: Semelhantes (verificar manualmente)
-- **Similaridade <80%**: Provavelmente não são duplicatas
+- **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
+- **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
+- **Similaridade 50-70%**: Semelhantes (verificar manualmente)
+- **Similaridade <50%**: Provavelmente não são duplicatas
 """)
 
 # Contato e informações
