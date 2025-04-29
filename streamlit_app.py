@@ -67,8 +67,9 @@ def calcular_similaridade(img1, img2):
         if img1.shape != img2.shape:
             img2 = resize(img2, img1.shape)
         
-        # Calcular SSIM
-        score = ssim(img1, img2)
+        # Calcular SSIM com data_range especificado
+        # As imagens são normalizadas para [0, 1], então o data_range é 1.0
+        score = ssim(img1, img2, data_range=1.0)
         return score
     except Exception as e:
         st.error(f"Erro ao calcular similaridade: {e}")
@@ -168,9 +169,10 @@ def detectar_duplicatas(imagens, nomes, limiar=0.8):
             if i != j:
                 comparacao_atual += 1
                 
-                # Atualizar progresso
+                # Atualizar progresso de maneira mais segura
                 if total_comparacoes > 0:
-                    progress = comparacao_atual / total_comparacoes
+                    # Certificar que o progresso sempre está entre 0 e 1
+                    progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
                     progress_bar.progress(progress)
                 
                 # Calcular similaridade
@@ -215,30 +217,33 @@ if uploaded_files:
                 st.error(f"Erro ao abrir a imagem {arquivo.name}: {e}")
         
         # Detectar duplicatas
-        duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade)
-        
-        # Visualizar resultados
-        if duplicatas:
-            st.markdown("### 🔹 Resultados da Detecção")
+        try:
+            duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade)
             
-            # Estatísticas
-            total_duplicatas = sum(len(similares) for similares in duplicatas.values())
-            st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
-            
-            # Visualizar duplicatas
-            df_relatorio = visualizar_duplicatas(imagens, nomes, duplicatas, limiar_similaridade)
-            
-            # Gerar relatório
-            if df_relatorio is not None:
-                st.markdown("### 🔹 Relatório de Duplicatas")
-                st.dataframe(df_relatorio)
+            # Visualizar resultados
+            if duplicatas:
+                st.markdown("### 🔹 Resultados da Detecção")
                 
-                # Opção para download do relatório
-                nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-                st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
-                                                "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
-        else:
-            st.info("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+                # Estatísticas
+                total_duplicatas = sum(len(similares) for similares in duplicatas.values())
+                st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
+                
+                # Visualizar duplicatas
+                df_relatorio = visualizar_duplicatas(imagens, nomes, duplicatas, limiar_similaridade)
+                
+                # Gerar relatório
+                if df_relatorio is not None:
+                    st.markdown("### 🔹 Relatório de Duplicatas")
+                    st.dataframe(df_relatorio)
+                    
+                    # Opção para download do relatório
+                    nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+                    st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
+                                                    "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
+            else:
+                st.info("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+        except Exception as e:
+            st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
 else:
     # Mostrar exemplo quando não há imagens carregadas
     st.info("Faça upload de imagens para começar a detecção de duplicatas.")
