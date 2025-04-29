@@ -1,20 +1,15 @@
-# app.py - Aplicação Streamlit para Detecção de Fraudes em Imagens
 import streamlit as st
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import tempfile
 from PIL import Image
-import tensorflow as tf
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-import faiss
-# Removida dependência de tqdm
-import pickle
-import time
-import pandas as pd
 import io
 import base64
+from skimage.metrics import structural_similarity as ssim
+from skimage.transform import resize
+from skimage import img_as_float
+import pandas as pd
+import time
 
 # Configuração da página Streamlit
 st.set_page_config(
@@ -27,12 +22,12 @@ st.set_page_config(
 # Título e introdução
 st.title("📊 Sistema de Detecção de Fraudes em Imagens")
 st.markdown("""
-Este sistema utiliza Inteligência Artificial para detectar imagens duplicadas ou altamente semelhantes, 
+Este sistema utiliza técnicas de visão computacional para detectar imagens duplicadas ou altamente semelhantes, 
 mesmo com pequenas alterações como cortes, ajustes de brilho ou espelhamento.
 
 ### Como funciona?
 1. Faça upload das imagens para análise
-2. O sistema extrai "assinaturas digitais" (embeddings) das imagens
+2. O sistema extrai características das imagens
 3. Automaticamente compara as imagens entre si
 4. Identifica possíveis duplicatas baseadas no limiar de similaridade definido
 """)
@@ -43,61 +38,41 @@ limiar_similaridade = st.sidebar.slider(
     "Limiar de Similaridade (%)", 
     min_value=70, 
     max_value=100, 
-    value=90, 
+    value=80, 
     help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
 )
 limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
 
-# Funções do sistema
-@st.cache_resource
-def carregar_modelo():
-    """Carrega o modelo ResNet50 para extração de características"""
-    with st.spinner("Carregando modelo de IA (isso pode levar alguns segundos)..."):
-        modelo_base = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-    return modelo_base
-
+# Funções para processamento de imagens
 def preprocessar_imagem(img, tamanho=(224, 224)):
-    """Pré-processa uma imagem para o modelo"""
+    """Pré-processa uma imagem para análise"""
     try:
-        img = img.resize(tamanho)
-        img_array = image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)
-        img_array = preprocess_input(img_array)
+        # Redimensionar
+        img_resize = img.resize(tamanho)
+        # Converter para escala de cinza para simplificar a comparação
+        img_gray = img_resize.convert('L')
+        # Converter para array numpy
+        img_array = np.array(img_gray)
+        # Normalizar valores para [0, 1]
+        img_array = img_array / 255.0
         return img_array
     except Exception as e:
         st.error(f"Erro ao processar imagem: {e}")
         return None
 
-def extrair_embedding(modelo, imagem_processada):
-    """Extrai o embedding de uma imagem"""
-    if imagem_processada is not None:
-        embedding = modelo.predict(imagem_processada, verbose=0)
-        # Normalizar (obrigatório para FAISS IndexFlatIP)
-        embedding = embedding / np.linalg.norm(embedding)
-        return embedding.flatten()
-    return None
-
-def criar_indice_faiss(embeddings):
-    """Cria um índice FAISS para busca rápida"""
-    dimensao = embeddings.shape[1]
-    indice = faiss.IndexFlatIP(dimensao)  # Produto interno (similaridade de cosseno para vetores normalizados)
-    indice.add(embeddings)
-    return indice
-
-def buscar_similares(indice, embedding_consulta, k=5):
-    """Busca as k imagens mais similares"""
-    if embedding_consulta.ndim == 1:
-        embedding_consulta = np.expand_dims(embedding_consulta, axis=0)
-    distancias, indices = indice.search(embedding_consulta, k)
-    return distancias, indices
-
-def get_image_download_link(img, filename, text):
-    """Gera link para download de imagem"""
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    href = f'<a href="data:file/jpg;base64,{img_str}" download="{filename}">{text}</a>'
-    return href
+def calcular_similaridade(img1, img2):
+    """Calcula a similaridade entre duas imagens usando SSIM"""
+    try:
+        # Garantir que as imagens tenham o mesmo tamanho
+        if img1.shape != img2.shape:
+            img2 = resize(img2, img1.shape)
+        
+        # Calcular SSIM
+        score = ssim(img1, img2)
+        return score
+    except Exception as e:
+        st.error(f"Erro ao calcular similaridade: {e}")
+        return 0
 
 def get_csv_download_link(df, filename, text):
     """Gera link para download de CSV"""
@@ -152,19 +127,16 @@ def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
     return None
 
 # Função principal para detectar duplicatas
-def detectar_duplicatas(imagens, nomes, limiar=0.9):
+def detectar_duplicatas(imagens, nomes, limiar=0.8):
     """Detecta duplicatas entre as imagens carregadas"""
     # Mostrar progresso
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Carregar modelo
-    modelo = carregar_modelo()
-    
     # Processar imagens
-    status_text.text("Extraindo características das imagens...")
-    embeddings = []
-    processados = []
+    status_text.text("Processando imagens...")
+    arrays_processados = []
+    indices_validos = []
     
     for i, img in enumerate(imagens):
         # Atualizar barra de progresso
@@ -172,45 +144,45 @@ def detectar_duplicatas(imagens, nomes, limiar=0.9):
         progress_bar.progress(progress)
         status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
         
-        img_processada = preprocessar_imagem(img)
-        if img_processada is not None:
-            embedding = extrair_embedding(modelo, img_processada)
-            if embedding is not None:
-                embeddings.append(embedding)
-                processados.append(i)
+        # Preprocessar imagem
+        img_array = preprocessar_imagem(img)
+        if img_array is not None:
+            arrays_processados.append(img_array)
+            indices_validos.append(i)
     
-    if not embeddings:
+    if not arrays_processados:
         status_text.error("Nenhuma imagem válida para processamento.")
         return None
     
-    # Converter para array numpy
-    embeddings = np.array(embeddings)
-    
-    # Criar índice FAISS
-    status_text.text("Criando índice para busca rápida...")
-    indice = criar_indice_faiss(embeddings)
-    
-    # Buscar duplicatas
+    # Calcular similaridades
     status_text.text("Comparando imagens e buscando duplicatas...")
     duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
     
-    for i, idx in enumerate(processados):
-        # Atualizar progresso
-        progress = (i + 1) / len(processados)
-        progress_bar.progress(progress)
-        
-        # Buscar similares (exceto a própria imagem)
-        distancias, indices = buscar_similares(indice, embeddings[i], k=len(embeddings))
-        
-        # Filtrar similares acima do limiar (excluindo a própria imagem)
+    total_comparacoes = len(arrays_processados) * (len(arrays_processados) - 1) // 2
+    comparacao_atual = 0
+    
+    for i in range(len(arrays_processados)):
         similares = []
-        for j in range(1, len(indices[0])):  # Começa de 1 para ignorar a própria imagem
-            if distancias[0][j] >= limiar:
-                similar_global_idx = processados[indices[0][j]]
-                similares.append((similar_global_idx, distancias[0][j]))
+        for j in range(len(arrays_processados)):
+            # Não comparar uma imagem com ela mesma
+            if i != j:
+                comparacao_atual += 1
+                
+                # Atualizar progresso
+                if total_comparacoes > 0:
+                    progress = comparacao_atual / total_comparacoes
+                    progress_bar.progress(progress)
+                
+                # Calcular similaridade
+                similaridade = calcular_similaridade(arrays_processados[i], arrays_processados[j])
+                
+                # Se acima do limiar, adicionar como duplicata
+                if similaridade >= limiar:
+                    similares.append((indices_validos[j], similaridade))
         
+        # Se encontrou duplicatas, adicionar à lista
         if similares:
-            duplicatas[idx] = similares
+            duplicatas[indices_validos[i]] = similares
     
     progress_bar.empty()
     status_text.text("Processamento concluído!")
@@ -271,9 +243,20 @@ else:
     # Mostrar exemplo quando não há imagens carregadas
     st.info("Faça upload de imagens para começar a detecção de duplicatas.")
     
-    # Opção de demonstração com imagens de exemplo
-    if st.button("🔍 Ver demonstração com imagens de exemplo"):
-        st.write("Função de demonstração ainda não implementada. Por favor, faça upload de suas próprias imagens.")
+    # Adicionar imagens de exemplo
+    if st.button("🔍 Ver imagens de exemplo"):
+        # Criar colunas para exibir as imagens de exemplo
+        cols = st.columns(3)
+        
+        # Criar imagens de exemplo
+        with cols[0]:
+            st.image("https://via.placeholder.com/300x200?text=Exemplo+1", caption="Exemplo 1")
+        with cols[1]:
+            st.image("https://via.placeholder.com/300x200?text=Exemplo+2", caption="Exemplo 2")
+        with cols[2]:
+            st.image("https://via.placeholder.com/300x200?text=Exemplo+3", caption="Exemplo 3")
+        
+        st.write("Nota: As imagens acima são apenas exemplos visuais. Faça upload de suas próprias imagens para análise.")
 
 # Rodapé
 st.markdown("---")
