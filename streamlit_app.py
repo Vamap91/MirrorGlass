@@ -10,50 +10,294 @@ from skimage.transform import resize
 from skimage import img_as_float
 from skimage.feature import ORB, match_descriptors
 from skimage.color import rgb2gray
+from skimage.feature import local_binary_pattern
+from scipy.stats import entropy
 import pandas as pd
 import time
 import cv2
 
 # Configuração da página Streamlit
 st.set_page_config(
-    page_title="Detector de Imagens Duplicadas",
+    page_title="Mirror Glass - Detector de Fraudes em Imagens",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # Título e introdução
-st.title("📊 Sistema de Detecção de Fraudes em Imagens")
+st.title("📊 Mirror Glass: Sistema de Detecção de Fraudes em Imagens")
 st.markdown("""
-Este sistema utiliza técnicas de visão computacional para detectar imagens duplicadas ou altamente semelhantes, 
-mesmo com pequenas alterações como cortes, ajustes de brilho ou espelhamento.
+Este sistema utiliza técnicas avançadas de visão computacional para:
+1. **Detectar imagens duplicadas** ou altamente semelhantes, mesmo com alterações como cortes ou ajustes
+2. **Identificar manipulações por IA** que criam texturas artificialmente uniformes em áreas danificadas
 
 ### Como funciona?
 1. Faça upload das imagens para análise
-2. O sistema extrai características das imagens usando múltiplos métodos
-3. Automaticamente compara as imagens entre si
-4. Identifica possíveis duplicatas baseadas no limiar de similaridade definido
+2. O sistema analisa duplicidade usando SIFT/SSIM e manipulações de textura usando LBP
+3. Resultados são exibidos com detalhamento visual e score de naturalidade
 """)
+
+# Classe para análise de texturas
+class TextureAnalyzer:
+    """
+    Classe para análise de texturas usando Local Binary Pattern (LBP).
+    Detecta manipulações em imagens automotivas, principalmente restaurações por IA.
+    """
+    
+    def __init__(self, P=8, R=1, block_size=16, threshold=0.3):
+        """
+        Inicializa o analisador de textura.
+        
+        Args:
+            P: Número de pontos vizinhos para o LBP
+            R: Raio para o LBP
+            block_size: Tamanho dos blocos para análise local (pixels)
+            threshold: Limiar para considerar baixa variância (0-1)
+        """
+        self.P = P  # Número de pontos vizinhos
+        self.R = R  # Raio
+        self.block_size = block_size  # Tamanho dos blocos para análise
+        self.threshold = threshold  # Limiar para textura suspeita
+    
+    def calculate_lbp(self, image):
+        """
+        Calcula o padrão binário local (LBP) da imagem.
+        """
+        # Converter para escala de cinza e array numpy
+        if isinstance(image, Image.Image):
+            img_gray = np.array(image.convert('L'))
+        elif len(image.shape) > 2:
+            img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            img_gray = image
+            
+        # Calcular LBP
+        lbp = local_binary_pattern(img_gray, self.P, self.R, method="uniform")
+        
+        # Calcular histograma de padrões
+        n_bins = self.P + 2
+        hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
+        hist = hist.astype("float")
+        hist /= (hist.sum() + 1e-7)  # Normalização
+        
+        return lbp, hist
+    
+    def analyze_texture_variance(self, image):
+        """
+        Analisa a variância local das texturas e identifica áreas com baixa entropia.
+        """
+        # Converter para formato numpy se for PIL
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        # Cálculo do LBP
+        lbp_image, _ = self.calculate_lbp(image)
+        
+        # Inicializa matriz de variância e entropia
+        height, width = lbp_image.shape
+        rows = max(1, height // self.block_size)
+        cols = max(1, width // self.block_size)
+        
+        variance_map = np.zeros((rows, cols))
+        entropy_map = np.zeros((rows, cols))
+        
+        # Analisa blocos da imagem
+        for i in range(0, height - self.block_size + 1, self.block_size):
+            for j in range(0, width - self.block_size + 1, self.block_size):
+                block = lbp_image[i:i+self.block_size, j:j+self.block_size]
+                
+                # Calcula a entropia do bloco (medida de aleatoriedade)
+                hist, _ = np.histogram(block, bins=10, range=(0, 10))
+                hist = hist.astype("float")
+                hist /= (hist.sum() + 1e-7)
+                block_entropy = entropy(hist)
+                
+                # Normaliza a entropia para um intervalo de 0 a 1
+                max_entropy = np.log(10)  # Entropia máxima para 10 bins
+                norm_entropy = block_entropy / max_entropy if max_entropy > 0 else 0
+                
+                # Calcula variância normalizada
+                block_variance = np.var(block) / 255.0
+                
+                # Armazena nos mapas
+                row_idx = i // self.block_size
+                col_idx = j // self.block_size
+                
+                if row_idx < rows and col_idx < cols:
+                    variance_map[row_idx, col_idx] = block_variance
+                    entropy_map[row_idx, col_idx] = norm_entropy
+        
+        # Combina entropia e variância para pontuação de naturalidade (70% entropia, 30% variância)
+        naturalness_map = entropy_map * 0.7 + variance_map * 0.3
+        
+        # Normaliza o mapa para visualização
+        norm_naturalness_map = cv2.normalize(naturalness_map, None, 0, 1, cv2.NORM_MINMAX)
+        
+        # Cria máscara de áreas suspeitas (baixa naturalidade)
+        suspicious_mask = norm_naturalness_map < self.threshold
+        
+        # Calcula score de naturalidade (0-100)
+        naturalness_score = int(np.mean(norm_naturalness_map) * 100)
+        
+        # Converte para mapa de calor para visualização
+        heatmap = cv2.applyColorMap((norm_naturalness_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        
+        return {
+            "variance_map": variance_map,
+            "naturalness_map": norm_naturalness_map,
+            "suspicious_mask": suspicious_mask,
+            "naturalness_score": naturalness_score,
+            "heatmap": heatmap
+        }
+    
+    def classify_naturalness(self, score):
+        """
+        Classifica o score de naturalidade em categorias.
+        """
+        if score <= 30:
+            return "Alta chance de manipulação", "Textura artificial detectada"
+        elif score <= 70:
+            return "Textura suspeita", "Revisão manual sugerida"
+        else:
+            return "Textura natural", "Baixa chance de manipulação"
+    
+    def generate_visual_report(self, image, analysis_results):
+        """
+        Gera relatório visual com áreas suspeitas destacadas.
+        """
+        # Converter para numpy se for PIL
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
+        
+        # Extrair resultados
+        naturalness_map = analysis_results["naturalness_map"]
+        suspicious_mask = analysis_results["suspicious_mask"]
+        score = analysis_results["naturalness_score"]
+        
+        # Redimensionar para o tamanho da imagem original
+        height, width = image.shape[:2]
+        mask_height, mask_width = suspicious_mask.shape
+        
+        # Redimensionar naturalness_map e suspicious_mask
+        naturalness_map_resized = cv2.resize(naturalness_map, 
+                                           (width, height), 
+                                           interpolation=cv2.INTER_LINEAR)
+        
+        mask_resized = cv2.resize(suspicious_mask.astype(np.uint8), 
+                                 (width, height), 
+                                 interpolation=cv2.INTER_NEAREST)
+        
+        # Criar mapa de calor
+        heatmap = cv2.applyColorMap((naturalness_map_resized * 255).astype(np.uint8), 
+                                    cv2.COLORMAP_JET)
+        
+        # Criar overlay com 40% de transparência
+        overlay = cv2.addWeighted(image, 0.6, heatmap, 0.4, 0)
+        
+        # Destacar áreas suspeitas com contorno
+        highlighted = overlay.copy()
+        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, 
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(highlighted, contours, -1, (0, 0, 255), 2)
+        
+        # Classificar resultado
+        category, description = self.classify_naturalness(score)
+        
+        # Adicionar informações na imagem
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(highlighted, f"Score: {score}/100", (10, 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(highlighted, category, (10, 60), font, 0.7, (255, 255, 255), 2)
+        
+        return highlighted, heatmap
+    
+    def analyze_image(self, image):
+        """
+        Função completa para analisar a textura de uma imagem.
+        """
+        # Analisar textura
+        analysis_results = self.analyze_texture_variance(image)
+        
+        # Gerar visualização
+        visual_report, heatmap = self.generate_visual_report(image, analysis_results)
+        
+        # Classificar o resultado
+        score = analysis_results["naturalness_score"]
+        category, description = self.classify_naturalness(score)
+        
+        # Calcular percentual de áreas suspeitas
+        percent_suspicious = float(np.mean(analysis_results["suspicious_mask"]) * 100)
+        
+        # Criar relatório final
+        report = {
+            "score": score,
+            "category": category,
+            "description": description,
+            "percent_suspicious": percent_suspicious,
+            "visual_report": visual_report,
+            "heatmap": heatmap,
+            "analysis_results": analysis_results
+        }
+        
+        return report
 
 # Barra lateral com controles
 st.sidebar.header("⚙️ Configurações")
-limiar_similaridade = st.sidebar.slider(
-    "Limiar de Similaridade (%)", 
-    min_value=30, 
-    max_value=100, 
-    value=50, 
-    help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
-)
-limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
 
-# Método de detecção
-metodo_deteccao = st.sidebar.selectbox(
-    "Método de Detecção",
-    ["SIFT (melhor para recortes)", "SSIM + SIFT", "SSIM"],
-    help="Escolha o método para detectar imagens similares"
+# Seleção de modo
+modo_analise = st.sidebar.radio(
+    "Modo de Análise",
+    ["Duplicidade", "Manipulação por IA", "Análise Completa"],
+    help="Escolha o tipo de análise a ser realizada"
 )
 
-# Funções para processamento de imagens
+# Configurações para detecção de duplicidade
+if modo_analise in ["Duplicidade", "Análise Completa"]:
+    st.sidebar.subheader("Configurações de Duplicidade")
+    limiar_similaridade = st.sidebar.slider(
+        "Limiar de Similaridade (%)", 
+        min_value=30, 
+        max_value=100, 
+        value=50, 
+        help="Imagens com similaridade acima deste valor serão consideradas possíveis duplicatas"
+    )
+    limiar_similaridade = limiar_similaridade / 100  # Converter para decimal
+
+    metodo_deteccao = st.sidebar.selectbox(
+        "Método de Detecção",
+        ["SIFT (melhor para recortes)", "SSIM + SIFT", "SSIM"],
+        help="Escolha o método para detectar imagens similares"
+    )
+
+# Configurações para detecção de manipulação por IA
+if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+    st.sidebar.subheader("Configurações de Análise de Textura")
+    limiar_naturalidade = st.sidebar.slider(
+        "Limiar de Naturalidade", 
+        min_value=30, 
+        max_value=70, 
+        value=50, 
+        help="Score abaixo deste valor indica possível manipulação por IA"
+    )
+    
+    tamanho_bloco = st.sidebar.slider(
+        "Tamanho do Bloco", 
+        min_value=8, 
+        max_value=32, 
+        value=16, 
+        step=4,
+        help="Tamanho do bloco para análise de textura (menor = mais sensível)"
+    )
+    
+    threshold_lbp = st.sidebar.slider(
+        "Sensibilidade LBP", 
+        min_value=0.1, 
+        max_value=0.5, 
+        value=0.3, 
+        step=0.05,
+        help="Limiar para detecção de áreas suspeitas (menor = mais sensível)"
+    )
+
+# Funções para processamento de imagens - DUPLICIDADE
 def preprocessar_imagem(img, tamanho=(300, 300)):
     """Pré-processa uma imagem para análise"""
     try:
@@ -166,6 +410,25 @@ def get_csv_download_link(df, filename, text):
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
     href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+    return href
+
+def get_image_download_link(img, filename, text):
+    """Gera link para download de imagem"""
+    # Converter para PIL Image se for numpy array
+    if isinstance(img, np.ndarray):
+        img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    else:
+        img_pil = img
+        
+    # Salvar em buffer
+    buf = io.BytesIO()
+    img_pil.save(buf, format='JPEG')
+    buf.seek(0)
+    
+    # Codificar para base64
+    img_str = base64.b64encode(buf.read()).decode()
+    href = f'<a href="data:image/jpeg;base64,{img_str}" download="{filename}">{text}</a>'
+    
     return href
 
 def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
@@ -302,6 +565,126 @@ def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT (melhor para re
     
     return duplicatas
 
+# Funções para análise de manipulação por IA
+def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloco=16, threshold=0.3):
+    """Analisa as imagens quanto a manipulações de textura por IA"""
+    # Inicializar analisador de textura
+    analyzer = TextureAnalyzer(P=8, R=1, block_size=tamanho_bloco, threshold=threshold)
+    
+    # Mostrar progresso
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Resultados
+    resultados = []
+    
+    # Processar cada imagem
+    for i, img in enumerate(imagens):
+        # Atualizar barra de progresso
+        progress = (i + 1) / len(imagens)
+        progress_bar.progress(progress)
+        status_text.text(f"Analisando textura da imagem {i+1} de {len(imagens)}: {nomes[i]}")
+        
+        # Analisar imagem
+        report = analyzer.analyze_image(img)
+        
+        # Adicionar informações ao relatório
+        resultados.append({
+            "indice": i,
+            "nome": nomes[i],
+            "score": report["score"],
+            "categoria": report["category"],
+            "descricao": report["description"],
+            "percentual_suspeito": report["percent_suspicious"],
+            "visual_report": report["visual_report"],
+            "heatmap": report["heatmap"]
+        })
+    
+    progress_bar.empty()
+    status_text.text("Análise de textura concluída!")
+    
+    return resultados
+
+# Função para exibir resultados da análise de textura
+def exibir_resultados_textura(resultados):
+    """Exibe os resultados da análise de textura"""
+    if not resultados:
+        st.info("Nenhum resultado de análise de textura disponível.")
+        return None
+    
+    # Criar DataFrame para relatório
+    relatorio_dados = []
+    
+    # Para cada imagem analisada
+    for res in resultados:
+        # Adicionar cabeçalho
+        st.write("---")
+        st.subheader(f"Análise de Textura: {res['nome']}")
+        
+        # Layout para exibir resultados
+        col1, col2 = st.columns(2)
+        
+        # Coluna 1: Imagem original e informações
+        with col1:
+            st.image(res["visual_report"], caption=f"Análise de Textura - {res['nome']}", use_column_width=True)
+            
+            # Adicionar métricas
+            st.metric("Score de Naturalidade", res["score"])
+            
+            # Status baseado no score
+            if res["score"] <= 30:
+                st.error(f"⚠️ {res['categoria']}: {res['descricao']}")
+            elif res["score"] <= 70:
+                st.warning(f"⚠️ {res['categoria']}: {res['descricao']}")
+            else:
+                st.success(f"✅ {res['categoria']}: {res['descricao']}")
+                
+            # Download da imagem analisada
+            st.markdown(
+                get_image_download_link(
+                    res["visual_report"], 
+                    f"analise_{res['nome'].replace(' ', '_')}.jpg",
+                    "📥 Baixar Imagem Analisada"
+                ),
+                unsafe_allow_html=True
+            )
+        
+        # Coluna 2: Mapa de calor e detalhes
+        with col2:
+            st.image(res["heatmap"], caption="Mapa de Calor LBP", use_column_width=True)
+            
+            st.write("### Detalhes da Análise")
+            st.write(f"- **Áreas suspeitas:** {res['percentual_suspeito']:.2f}% da imagem")
+            st.write(f"- **Interpretação:** {res['descricao']}")
+            st.write("- **Legenda do Mapa de Calor:**")
+            st.write("  - Azul: Texturas naturais (alta variabilidade)")
+            st.write("  - Vermelho: Texturas artificiais (baixa variabilidade)")
+            
+        # Adicionar ao relatório
+        relatorio_dados.append({
+            "Arquivo": res["nome"],
+            "Score de Naturalidade": res["score"],
+            "Categoria": res["categoria"],
+            "Percentual Suspeito (%)": round(res["percentual_suspeito"], 2)
+        })
+    
+    # Criar DataFrame do relatório
+    if relatorio_dados:
+        st.write("---")
+        st.write("### Resumo da Análise de Textura")
+        df_relatorio = pd.DataFrame(relatorio_dados)
+        st.dataframe(df_relatorio)
+        
+        # Opção para download do relatório
+        nome_arquivo = f"relatorio_texturas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        st.markdown(
+            get_csv_download_link(df_relatorio, nome_arquivo, "📥 Baixar Relatório CSV"),
+            unsafe_allow_html=True
+        )
+        
+        return df_relatorio
+    return None
+
 # Interface principal
 st.markdown("### 🔹 Passo 1: Carregar Imagens")
 uploaded_files = st.file_uploader(
@@ -311,84 +694,4 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    st.write(f"✅ {len(uploaded_files)} imagens carregadas")
-    
-    # Criar botão para iniciar processamento
-    if st.button("🚀 Iniciar Detecção de Duplicatas"):
-        # Carregar imagens
-        imagens = []
-        nomes = []
-        
-        for arquivo in uploaded_files:
-            try:
-                img = Image.open(arquivo).convert('RGB')
-                imagens.append(img)
-                nomes.append(arquivo.name)
-            except Exception as e:
-                st.error(f"Erro ao abrir a imagem {arquivo.name}: {e}")
-        
-        # Detectar duplicatas
-        try:
-            duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade, metodo_deteccao)
-            
-            # Visualizar resultados
-            if duplicatas:
-                st.markdown("### 🔹 Resultados da Detecção")
-                
-                # Estatísticas
-                total_duplicatas = sum(len(similares) for similares in duplicatas.values())
-                st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
-                
-                # Visualizar duplicatas
-                df_relatorio = visualizar_duplicatas(imagens, nomes, duplicatas, limiar_similaridade)
-                
-                # Gerar relatório
-                if df_relatorio is not None:
-                    st.markdown("### 🔹 Relatório de Duplicatas")
-                    st.dataframe(df_relatorio)
-                    
-                    # Opção para download do relatório
-                    nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-                    st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
-                                                    "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
-            else:
-                st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
-        except Exception as e:
-            st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
-else:
-    # Mostrar exemplo quando não há imagens carregadas
-    st.info("Faça upload de imagens para começar a detecção de duplicatas.")
-    
-    # Adicionar imagens de exemplo
-    if st.button("🔍 Ver imagens de exemplo"):
-        # Criar colunas para exibir as imagens de exemplo
-        cols = st.columns(3)
-        
-        # Criar imagens de exemplo
-        with cols[0]:
-            st.image("https://via.placeholder.com/300x200?text=Exemplo+1", caption="Exemplo 1")
-        with cols[1]:
-            st.image("https://via.placeholder.com/300x200?text=Exemplo+2", caption="Exemplo 2")
-        with cols[2]:
-            st.image("https://via.placeholder.com/300x200?text=Exemplo+3", caption="Exemplo 3")
-        
-        st.write("Nota: As imagens acima são apenas exemplos visuais. Faça upload de suas próprias imagens para análise.")
-
-# Rodapé
-st.markdown("---")
-st.markdown("### Como interpretar os resultados")
-st.write("""
-- **Similaridade 100%**: Imagens idênticas
-- **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
-- **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
-- **Similaridade 50-70%**: Semelhantes (verificar manualmente)
-- **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
-- **Similaridade <30%**: Provavelmente não são duplicatas
-""")
-
-# Contato e informações
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**Desenvolvido para:** Carglass Automotiva
-**Projeto:** Detecção de Fraudes em Pedidos com Imagens Duplicadas
-""")
+    st.write(f"✅ {len(uploaded_files)}
