@@ -1122,9 +1122,13 @@ def exibir_resultados_textura(resultados):
                     st.write("  - Modificações em áreas pequenas ou limitadas")
         
         # Mostrar mapas detalhados se disponíveis
-        if "detailed_maps" in res and res["detailed_maps"] is not None and len(res["detailed_maps"]) > 0:
-            with st.expander("Ver Análise Detalhada por Métrica"):
-                st.write("Cada mapa destaca um aspecto diferente da análise de textura:")
+                if map_name in res["detailed_maps"] and res["detailed_maps"][map_name] is not None:
+                    maps_to_show.append((map_name, title))
+
+                if res["detailed_maps"][map_name] is not None:
+                    st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                else:
+                    st.warning(f"Mapa de {title} não disponível")
                 
                 # Mostrar mapas em pares (2 colunas)
                 map_titles = {
