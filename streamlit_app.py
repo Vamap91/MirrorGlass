@@ -434,41 +434,66 @@ class TextureAnalyzer:
         return highlighted, heatmap, detailed_maps
     
     def analyze_image(self, image):
+        # Inicializa um relatório padrão com valores seguros
+        report = {
+            "score": 0,
+            "category": "Erro",
+            "description": "Falha na análise inicial",
+            "percentual_suspeito": 0,
+            "visual_report": None,
+            "heatmap": None,
+            "detailed_maps": {},
+            "analysis_results": {}
+        }
+        
         try:
             # Analisar textura
             analysis_results = self.analyze_texture_variance(image)
-            
+            if analysis_results is None:
+                raise ValueError("analyze_texture_variance retornou None")
+            report["analysis_results"] = analysis_results
+
             # Gerar visualização
             visual_report, heatmap, detailed_maps = self.generate_visual_report(image, analysis_results)
-            
+            report["visual_report"] = visual_report
+            report["heatmap"] = heatmap
+            report["detailed_maps"] = detailed_maps if detailed_maps is not None else {}
+
             # Classificar o resultado
-            score = analysis_results["naturalness_score"]
+            score = analysis_results.get("naturalness_score", 0)
+            report["score"] = score
             category, description = self.classify_naturalness(score)
-            
+            report["category"] = category
+            report["description"] = description
+
             # Calcular percentual de áreas suspeitas
-            percent_suspicious = float(np.mean(analysis_results["suspicious_mask"]) * 100)
-            
-            # Criar relatório final
-            report = {
-                "score": score,
-                "category": category,
-                "description": description,
-                "percentual_suspeito": percent_suspicious,
-                "visual_report": visual_report,
-                "heatmap": heatmap,
-                "detailed_maps": detailed_maps,
-                "analysis_results": analysis_results
-            }
-            
+            suspicious_mask = analysis_results.get("suspicious_mask")
+            if suspicious_mask is not None:
+                report["percentual_suspeito"] = float(np.mean(suspicious_mask) * 100)
+            else:
+                report["percentual_suspeito"] = 0.0
+
             return report
         except Exception as e:
-            raise Exception(f"Erro na análise de imagem: {str(e)}")
+            # Atualiza a descrição do erro no report padrão
+            report["description"] = f"Erro na análise de imagem: {str(e)}"
+            # Retorna o dicionário de erro padronizado
+            return report
     
     def compare_images(self, img1, img2):
         """
         Compara duas imagens para verificar se uma delas foi manipulada
         Útil para casos como 'Siena sem IA.jpg' vs 'Siena com IA.jpg'
         """
+        # Inicializa um relatório padrão com valores seguros
+        report = {
+            "visual_report": None,
+            "diff_map": None,
+            "diff_percentage": 0.0,
+            "texture_diff_score": 0.0,
+            "is_manipulated": False
+        }
+        
         try:
             # Converter para numpy se for PIL
             if isinstance(img1, Image.Image):
@@ -586,18 +611,18 @@ class TextureAnalyzer:
             diff_percentage = np.mean(diff_mask_norm) * 100
             texture_diff_score = np.mean(texture_score_resized) * 100
             
-            # Criar relatório
-            report = {
-                "visual_report": overlay,
-                "diff_map": diff_heatmap,
-                "diff_percentage": diff_percentage,
-                "texture_diff_score": texture_diff_score,
-                "is_manipulated": texture_diff_score > 30 or diff_percentage > 10
-            }
+            # Atualizar o relatório
+            report["visual_report"] = overlay
+            report["diff_map"] = diff_heatmap
+            report["diff_percentage"] = diff_percentage
+            report["texture_diff_score"] = texture_diff_score
+            report["is_manipulated"] = texture_diff_score > 30 or diff_percentage > 10
             
             return report
         except Exception as e:
-            raise Exception(f"Erro na comparação de imagens: {str(e)}")
+            # Em caso de erro, retornar o relatório padrão com a descrição do erro
+            report["description"] = f"Erro na comparação de imagens: {str(e)}"
+            return report
 
 # Barra lateral com controles
 st.sidebar.header("⚙️ Configurações")
@@ -966,18 +991,35 @@ def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloc
             # Analisar imagem individualmente
             report = analyzer.analyze_image(img)
             
-            # Adicionar informações ao relatório
+            # Validação adicional para garantir que report não é None
+            if report is None:
+                st.error(f"Erro crítico: analyze_image retornou None para {nomes[i]}")
+                resultados.append({
+                    "indice": i, 
+                    "nome": nomes[i], 
+                    "score": 0,
+                    "categoria": "Erro Crítico", 
+                    "descricao": "Falha interna na análise",
+                    "percentual_suspeito": 0,
+                    "visual_report": None, 
+                    "heatmap": None, 
+                    "detailed_maps": {},
+                    "comparison_report": None
+                })
+                continue  # Pula para a próxima imagem
+            
+            # Adicionar informações ao relatório (agora com acesso mais seguro)
             resultados.append({
                 "indice": i,
                 "nome": nomes[i],
-                "score": report["score"],
-                "categoria": report["category"],
-                "descricao": report["description"],
-                "percentual_suspeito": report["percentual_suspeito"],
-                "visual_report": report["visual_report"],
-                "heatmap": report["heatmap"],
+                "score": report.get("score", 0),
+                "categoria": report.get("category", "Erro"),
+                "descricao": report.get("description", "N/A"),
+                "percentual_suspeito": report.get("percentual_suspeito", 0),
+                "visual_report": report.get("visual_report"),
+                "heatmap": report.get("heatmap"),
                 "detailed_maps": report.get("detailed_maps", {}),
-                "comparison_report": None  # Será preenchido para pares
+                "comparison_report": None
             })
         except Exception as e:
             st.error(f"Erro ao analisar imagem {nomes[i]}: {str(e)}")
@@ -1014,14 +1056,16 @@ def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloc
                     status_text.text(f"Comparando {nomes[idx_sem_ia]} e {nomes[idx_com_ia]}...")
                     comparison_report = analyzer.compare_images(imagens[idx_sem_ia], imagens[idx_com_ia])
                     
-                    # Adicionar resultado ao relatório da imagem "com IA"
-                    resultados[idx_com_ia]["comparison_report"] = comparison_report
-                    
-                    # Se detectamos manipulação na comparação, reduzir o score
-                    if comparison_report["is_manipulated"]:
-                        resultados[idx_com_ia]["score"] = min(40, resultados[idx_com_ia]["score"])
-                        resultados[idx_com_ia]["categoria"] = "Alta chance de manipulação"
-                        resultados[idx_com_ia]["descricao"] = "Diferenças significativas detectadas na comparação"
+                    # Validação adicional para o comparison_report
+                    if comparison_report is not None:
+                        # Adicionar resultado ao relatório da imagem "com IA"
+                        resultados[idx_com_ia]["comparison_report"] = comparison_report
+                        
+                        # Se detectamos manipulação na comparação, reduzir o score
+                        if comparison_report.get("is_manipulated", False):
+                            resultados[idx_com_ia]["score"] = min(40, resultados[idx_com_ia]["score"])
+                            resultados[idx_com_ia]["categoria"] = "Alta chance de manipulação"
+                            resultados[idx_com_ia]["descricao"] = "Diferenças significativas detectadas na comparação"
                 except Exception as e:
                     st.error(f"Erro ao comparar imagens {nomes[idx_sem_ia]} e {nomes[idx_com_ia]}: {str(e)}")
     
@@ -1100,35 +1144,31 @@ def exibir_resultados_textura(resultados):
             with comp_cols[0]:
                 st.image(comp_report["visual_report"], caption="Diferenças Detectadas", use_column_width=True)
                 
-                if comp_report["is_manipulated"]:
+                if comp_report.get("is_manipulated", False):
                     st.error("⚠️ Manipulação detectada na comparação direta")
                 else:
                     st.success("✅ Sem manipulações significativas na comparação")
                 
             with comp_cols[1]:
                 st.write("### Detalhes da Comparação")
-                st.write(f"- **Diferença percentual:** {comp_report['diff_percentage']:.2f}% da imagem")
-                st.write(f"- **Score de diferença de textura:** {comp_report['texture_diff_score']:.2f}")
+                st.write(f"- **Diferença percentual:** {comp_report.get('diff_percentage', 0):.2f}% da imagem")
+                st.write(f"- **Score de diferença de textura:** {comp_report.get('texture_diff_score', 0):.2f}")
                 st.write("- **Interpretação:**")
                 
-                if comp_report["texture_diff_score"] > 30:
+                if comp_report.get("texture_diff_score", 0) > 30:
                     st.write("  - Texturas significativamente diferentes nas áreas modificadas")
                 else:
                     st.write("  - Texturas similares, possíveis alterações menores")
                     
-                if comp_report["diff_percentage"] > 10:
+                if comp_report.get("diff_percentage", 0) > 10:
                     st.write("  - Grandes áreas da imagem foram modificadas")
                 else:
                     st.write("  - Modificações em áreas pequenas ou limitadas")
         
         # Mostrar mapas detalhados se disponíveis
-                if map_name in res["detailed_maps"] and res["detailed_maps"][map_name] is not None:
-                    maps_to_show.append((map_name, title))
-
-                if res["detailed_maps"][map_name] is not None:
-                    st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
-                else:
-                    st.warning(f"Mapa de {title} não disponível")
+        if "detailed_maps" in res and res["detailed_maps"] is not None and len(res["detailed_maps"]) > 0:
+            with st.expander("Ver Análise Detalhada por Métrica"):
+                st.write("Cada mapa destaca um aspecto diferente da análise de textura:")
                 
                 # Mostrar mapas em pares (2 colunas)
                 map_titles = {
