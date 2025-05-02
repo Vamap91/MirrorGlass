@@ -694,4 +694,6 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    st.write(f"✅ {len(uploaded_files)}
+    st.write(f"✅ {len(uploaded_files)} imagens carregadas")
+    
+    #
