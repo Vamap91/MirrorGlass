@@ -683,9 +683,9 @@ if uploaded_files:
                     # Gerar relatório
                     if df_relatorio is not None:
                         st.markdown("### 🔹 Relatório de Duplicatas")
-                        st.dataframe(df_relatorio)
-                        
-# Opção para download do relatório
+                        st.dataframe(df_relatorio)  
+                    
+                    # Opção para download do relatório
                        nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
                        st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
                                                     "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
