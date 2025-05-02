@@ -8,7 +8,8 @@ import base64
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import resize
 from skimage.feature import local_binary_pattern
-from scipy.stats import entropy
+from skimage.restoration import estimate_sigma
+from scipy.stats import entropy, kurtosis
 import pandas as pd
 import time
 import cv2
@@ -34,18 +35,19 @@ Este sistema utiliza técnicas avançadas de visão computacional para:
 3. Resultados são exibidos com detalhamento visual e score de naturalidade
 """)
 
-# Classe para análise de texturas
+# Classe para análise de texturas melhorada
 class TextureAnalyzer:
     """
     Classe para análise de texturas usando Local Binary Pattern (LBP).
     Detecta manipulações em imagens automotivas, principalmente restaurações por IA.
     """
     
-    def __init__(self, P=8, R=1, block_size=16, threshold=0.3):
+    def __init__(self, P=8, R=1, block_size=16, threshold=0.35):
         self.P = P  # Número de pontos vizinhos
         self.R = R  # Raio
         self.block_size = block_size  # Tamanho dos blocos para análise
         self.threshold = threshold  # Limiar para textura suspeita
+        self.scales = [0.5, 1.0, 1.5]  # Múltiplas escalas para análise
     
     def calculate_lbp(self, image):
         # Converter para escala de cinza e array numpy
@@ -65,77 +67,184 @@ class TextureAnalyzer:
         hist = hist.astype("float")
         hist /= (hist.sum() + 1e-7)  # Normalização
         
-        return lbp, hist
+        return lbp, hist, img_gray
     
     def analyze_texture_variance(self, image):
+        """
+        Versão melhorada de análise de textura com:
+        1. Análise multiescala
+        2. Detecção de ruído
+        3. Análise de uniformidade de textura
+        4. Detecção de padrões artificiais
+        """
         # Converter para formato numpy se for PIL
         if isinstance(image, Image.Image):
             image = np.array(image)
         
-        # Cálculo do LBP
-        lbp_image, _ = self.calculate_lbp(image)
+        # Inicializar mapas de análise combinados
+        combined_maps = []
+        combined_masks = []
         
-        # Inicializa matriz de variância e entropia
-        height, width = lbp_image.shape
-        rows = max(1, height // self.block_size)
-        cols = max(1, width // self.block_size)
+        # Cálculo do LBP na escala original
+        lbp_image, _, img_gray = self.calculate_lbp(image)
         
-        variance_map = np.zeros((rows, cols))
-        entropy_map = np.zeros((rows, cols))
+        # Estimar o nível de ruído da imagem
+        noise_level = estimate_sigma(img_gray)
         
-        # Analisa blocos da imagem
-        for i in range(0, height - self.block_size + 1, self.block_size):
-            for j in range(0, width - self.block_size + 1, self.block_size):
-                block = lbp_image[i:i+self.block_size, j:j+self.block_size]
+        # Analisar em múltiplas escalas
+        for scale in self.scales:
+            # Redimensionar se não for escala 1.0
+            if scale != 1.0:
+                # Calcular novas dimensões
+                h, w = img_gray.shape
+                new_h, new_w = int(h * scale), int(w * scale)
                 
-                # Calcula a entropia do bloco (medida de aleatoriedade)
-                hist, _ = np.histogram(block, bins=10, range=(0, 10))
-                hist = hist.astype("float")
-                hist /= (hist.sum() + 1e-7)
-                block_entropy = entropy(hist)
+                # Redimensionar e calcular LBP
+                resized_gray = cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                lbp_scaled, _ = local_binary_pattern(resized_gray, self.P, self.R, method="uniform"), None
                 
-                # Normaliza a entropia para um intervalo de 0 a 1
-                max_entropy = np.log(10)  # Entropia máxima para 10 bins
-                norm_entropy = block_entropy / max_entropy if max_entropy > 0 else 0
-                
-                # Calcula variância normalizada
-                block_variance = np.var(block) / 255.0
-                
-                # Armazena nos mapas
-                row_idx = i // self.block_size
-                col_idx = j // self.block_size
-                
-                if row_idx < rows and col_idx < cols:
-                    variance_map[row_idx, col_idx] = block_variance
-                    entropy_map[row_idx, col_idx] = norm_entropy
+                # Redimensionar de volta para a escala original
+                lbp_current = cv2.resize(lbp_scaled, (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                lbp_current = lbp_image
+            
+            # Inicializa matriz de variância, entropia e medidas de textura artificial
+            height, width = lbp_current.shape
+            rows = max(1, height // self.block_size)
+            cols = max(1, width // self.block_size)
+            
+            variance_map = np.zeros((rows, cols))
+            entropy_map = np.zeros((rows, cols))
+            kurtosis_map = np.zeros((rows, cols))
+            noise_consistency_map = np.zeros((rows, cols))
+            
+            # Analisar blocos da imagem
+            for i in range(0, height - self.block_size + 1, self.block_size):
+                for j in range(0, width - self.block_size + 1, self.block_size):
+                    # Extrair blocos da imagem original e do LBP
+                    block_gray = img_gray[i:i+self.block_size, j:j+self.block_size]
+                    block_lbp = lbp_current[i:i+self.block_size, j:j+self.block_size]
+                    
+                    # Calcular a entropia do bloco (medida de aleatoriedade)
+                    hist, _ = np.histogram(block_lbp, bins=10, range=(0, 10))
+                    hist = hist.astype("float")
+                    hist /= (hist.sum() + 1e-7)
+                    block_entropy = entropy(hist)
+                    
+                    # Normalizar a entropia para um intervalo de 0 a 1
+                    max_entropy = np.log(10)  # Entropia máxima para 10 bins
+                    norm_entropy = block_entropy / max_entropy if max_entropy > 0 else 0
+                    
+                    # Calcular variância normalizada (uniformidade de textura)
+                    block_variance = np.var(block_lbp) / 255.0
+                    
+                    # Calcular kurtosis (mede picos/uniformidade artificial)
+                    # Valores altos de kurtosis indicam manipulação por IA
+                    block_kurtosis = kurtosis(block_lbp.flatten(), fisher=True)
+                    # Normalizar kurtosis para 0-1 (negativos viram 0, positivos são limitados a 1)
+                    norm_kurtosis = min(max(block_kurtosis, 0) / 5.0, 1.0)
+                    
+                    # Consistência de ruído (áreas manipuladas têm menos ruído)
+                    local_noise = estimate_sigma(block_gray)
+                    # Diferença entre ruído local e global (normalizada)
+                    noise_diff = abs(local_noise - noise_level) / max(noise_level, 0.001)
+                    noise_consistency = min(noise_diff * 3.0, 1.0)  # Amplificar e limitar
+                    
+                    # Armazenar nos mapas
+                    row_idx = i // self.block_size
+                    col_idx = j // self.block_size
+                    
+                    if row_idx < rows and col_idx < cols:
+                        variance_map[row_idx, col_idx] = block_variance
+                        entropy_map[row_idx, col_idx] = norm_entropy
+                        kurtosis_map[row_idx, col_idx] = norm_kurtosis
+                        noise_consistency_map[row_idx, col_idx] = noise_consistency
+            
+            # Combinar métricas para pontuação de naturalidade
+            # Entropia (40%) + Variância (20%) + Kurtosis (20%) + Ruído (20%)
+            naturalness_map = (entropy_map * 0.4 + 
+                              variance_map * 0.2 + 
+                              (1.0 - kurtosis_map) * 0.2 +  # Inverter kurtosis, menor é melhor
+                              (1.0 - noise_consistency_map) * 0.2)  # Inverter consistência de ruído
+            
+            # Normalizar o mapa para visualização
+            norm_naturalness_map = cv2.normalize(naturalness_map, None, 0, 1, cv2.NORM_MINMAX)
+            
+            # Cria máscara de áreas suspeitas (baixa naturalidade)
+            suspicious_mask = norm_naturalness_map < self.threshold
+            
+            # Adicionar à lista de mapas
+            combined_maps.append(norm_naturalness_map)
+            combined_masks.append(suspicious_mask)
         
-        # Combina entropia e variância para pontuação de naturalidade (70% entropia, 30% variância)
-        naturalness_map = entropy_map * 0.7 + variance_map * 0.3
+        # Combinação de mapas multiescala (média)
+        combined_naturalness_map = np.mean(combined_maps, axis=0)
         
-        # Normaliza o mapa para visualização
-        norm_naturalness_map = cv2.normalize(naturalness_map, None, 0, 1, cv2.NORM_MINMAX)
+        # Combinação de máscaras (união lógica)
+        combined_suspicious_mask = np.zeros_like(combined_masks[0], dtype=bool)
+        for mask in combined_masks:
+            combined_suspicious_mask = combined_suspicious_mask | mask
         
-        # Cria máscara de áreas suspeitas (baixa naturalidade)
-        suspicious_mask = norm_naturalness_map < self.threshold
-        
-        # Calcula score de naturalidade (0-100)
-        naturalness_score = int(np.mean(norm_naturalness_map) * 100)
+        # Calcular score de naturalidade final (0-100)
+        naturalness_score = int(np.mean(combined_naturalness_map) * 100)
         
         # Converte para mapa de calor para visualização
-        heatmap = cv2.applyColorMap((norm_naturalness_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        heatmap = cv2.applyColorMap(
+            (combined_naturalness_map * 255).astype(np.uint8), 
+            cv2.COLORMAP_JET
+        )
+        
+        # Criando mapa de calor específico para cada métrica
+        variance_heatmap = cv2.applyColorMap(
+            (cv2.normalize(variance_map, None, 0, 1, cv2.NORM_MINMAX) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET
+        )
+        
+        entropy_heatmap = cv2.applyColorMap(
+            (cv2.normalize(entropy_map, None, 0, 1, cv2.NORM_MINMAX) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET
+        )
+        
+        kurtosis_heatmap = cv2.applyColorMap(
+            (cv2.normalize(kurtosis_map, None, 0, 1, cv2.NORM_MINMAX) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET
+        )
+        
+        noise_heatmap = cv2.applyColorMap(
+            (cv2.normalize(noise_consistency_map, None, 0, 1, cv2.NORM_MINMAX) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET
+        )
+        
+        # Aplicar limiar ajustado com base no ruído global da imagem
+        # Imagens com menos ruído (mais suaves) precisam de threshold mais sensível
+        adjusted_threshold = self.threshold
+        if noise_level < 0.02:  # Limite muito baixo de ruído
+            adjusted_threshold = self.threshold * 0.8  # 20% mais sensível
         
         return {
             "variance_map": variance_map,
-            "naturalness_map": norm_naturalness_map,
-            "suspicious_mask": suspicious_mask,
+            "entropy_map": entropy_map,
+            "kurtosis_map": kurtosis_map,
+            "noise_map": noise_consistency_map,
+            "naturalness_map": combined_naturalness_map,
+            "suspicious_mask": combined_suspicious_mask,
             "naturalness_score": naturalness_score,
-            "heatmap": heatmap
+            "noise_level": noise_level,
+            "heatmap": heatmap,
+            "variance_heatmap": variance_heatmap,
+            "entropy_heatmap": entropy_heatmap,
+            "kurtosis_heatmap": kurtosis_heatmap,
+            "noise_heatmap": noise_heatmap,
+            "adjusted_threshold": adjusted_threshold
         }
     
     def classify_naturalness(self, score):
-        if score <= 30:
+        """
+        Classificação aprimorada - limites ajustados para maior sensibilidade
+        """
+        if score <= 40:  # Limiar mais alto (era 30)
             return "Alta chance de manipulação", "Textura artificial detectada"
-        elif score <= 70:
+        elif score <= 75:  # Limiar mais alto (era 70)
             return "Textura suspeita", "Revisão manual sugerida"
         else:
             return "Textura natural", "Baixa chance de manipulação"
@@ -149,6 +258,7 @@ class TextureAnalyzer:
         naturalness_map = analysis_results["naturalness_map"]
         suspicious_mask = analysis_results["suspicious_mask"]
         score = analysis_results["naturalness_score"]
+        noise_level = analysis_results["noise_level"]
         
         # Redimensionar para o tamanho da imagem original
         height, width = image.shape[:2]
@@ -173,7 +283,15 @@ class TextureAnalyzer:
         highlighted = overlay.copy()
         contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, 
                                        cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(highlighted, contours, -1, (0, 0, 255), 2)
+        
+        # Desenhar retângulos em áreas suspeitas maiores
+        for contour in contours:
+            # Filtrar contornos muito pequenos (podem ser ruído)
+            area = cv2.contourArea(contour)
+            if area > 100:  # Mínimo de pixels para considerar
+                x, y, w, h = cv2.boundingRect(contour)
+                # Desenhar retângulo roxo
+                cv2.rectangle(highlighted, (x, y), (x+w, y+h), (128, 0, 128), 2)
         
         # Classificar resultado
         category, description = self.classify_naturalness(score)
@@ -181,16 +299,30 @@ class TextureAnalyzer:
         # Adicionar informações na imagem
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(highlighted, f"Score: {score}/100", (10, 30), font, 0.7, (255, 255, 255), 2)
-        cv2.putText(highlighted, category, (10, 60), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(highlighted, f"Ruído: {noise_level:.5f}", (10, 60), font, 0.6, (255, 255, 255), 2)
+        cv2.putText(highlighted, category, (10, 90), font, 0.7, (255, 255, 255), 2)
         
-        return highlighted, heatmap
+        # Criar visualização de mapas individuais
+        # Redimensionar para visualização
+        detailed_maps = {}
+        map_names = ["variance_heatmap", "entropy_heatmap", "kurtosis_heatmap", "noise_heatmap"]
+        
+        for map_name in map_names:
+            if map_name in analysis_results:
+                map_data = analysis_results[map_name]
+                if map_data is not None:
+                    map_resized = cv2.resize(map_data, (width, height), 
+                                            interpolation=cv2.INTER_LINEAR)
+                    detailed_maps[map_name] = map_resized
+        
+        return highlighted, heatmap, detailed_maps
     
     def analyze_image(self, image):
         # Analisar textura
         analysis_results = self.analyze_texture_variance(image)
         
         # Gerar visualização
-        visual_report, heatmap = self.generate_visual_report(image, analysis_results)
+        visual_report, heatmap, detailed_maps = self.generate_visual_report(image, analysis_results)
         
         # Classificar o resultado
         score = analysis_results["naturalness_score"]
@@ -204,9 +336,11 @@ class TextureAnalyzer:
             "score": score,
             "category": category,
             "description": description,
-            "percent_suspicious": percent_suspicious,
+            "percentual_suspeito": percent_suspicious,
+            "noise_level": analysis_results["noise_level"],
             "visual_report": visual_report,
             "heatmap": heatmap,
+            "detailed_maps": detailed_maps,
             "analysis_results": analysis_results
         }
         
@@ -246,7 +380,7 @@ if modo_analise in ["Manipulação por IA", "Análise Completa"]:
     limiar_naturalidade = st.sidebar.slider(
         "Limiar de Naturalidade", 
         min_value=30, 
-        max_value=70, 
+        max_value=80, 
         value=50, 
         help="Score abaixo deste valor indica possível manipulação por IA"
     )
@@ -264,7 +398,7 @@ if modo_analise in ["Manipulação por IA", "Análise Completa"]:
         "Sensibilidade LBP", 
         min_value=0.1, 
         max_value=0.5, 
-        value=0.3, 
+        value=0.35, 
         step=0.05,
         help="Limiar para detecção de áreas suspeitas (menor = mais sensível)"
     )
@@ -468,6 +602,7 @@ def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT (melhor para re
     
     if not arrays_processados_gray:
         status_text.error("Nenhuma imagem válida para processamento.")
+        progress_bar.empty()
         return None
     
     # Calcular similaridades
@@ -523,8 +658,8 @@ def detectar_duplicatas(imagens, nomes, limiar=0.5, metodo="SIFT (melhor para re
     return duplicatas
 
 # Funções para análise de manipulação por IA
-def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloco=16, threshold=0.3):
-    # Inicializar analisador de textura
+def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloco=16, threshold=0.35):
+    # Inicializar analisador de textura melhorado
     analyzer = TextureAnalyzer(P=8, R=1, block_size=tamanho_bloco, threshold=threshold)
     
     # Mostrar progresso
@@ -552,8 +687,10 @@ def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloc
             "categoria": report["category"],
             "descricao": report["description"],
             "percentual_suspeito": report["percent_suspicious"],
+            "noise_level": report["noise_level"],
             "visual_report": report["visual_report"],
-            "heatmap": report["heatmap"]
+            "heatmap": report["heatmap"],
+            "detailed_maps": report.get("detailed_maps", {})
         })
     
     progress_bar.empty()
@@ -585,11 +722,12 @@ def exibir_resultados_textura(resultados):
             
             # Adicionar métricas
             st.metric("Score de Naturalidade", res["score"])
+            st.metric("Nível de Ruído", round(res.get("noise_level", 0) * 1000, 3))
             
             # Status baseado no score
-            if res["score"] <= 30:
+            if res["score"] <= 40:  # Limiar ajustado para maior sensibilidade
                 st.error(f"⚠️ {res['categoria']}: {res['descricao']}")
-            elif res["score"] <= 70:
+            elif res["score"] <= 75:  # Limiar ajustado para maior sensibilidade
                 st.warning(f"⚠️ {res['categoria']}: {res['descricao']}")
             else:
                 st.success(f"✅ {res['categoria']}: {res['descricao']}")
@@ -610,15 +748,36 @@ def exibir_resultados_textura(resultados):
             
             st.write("### Detalhes da Análise")
             st.write(f"- **Áreas suspeitas:** {res['percentual_suspeito']:.2f}% da imagem")
+            st.write(f"- **Nível de ruído:** {res.get('noise_level', 0):.5f} (valores baixos podem indicar manipulação)")
             st.write(f"- **Interpretação:** {res['descricao']}")
             st.write("- **Legenda do Mapa de Calor:**")
             st.write("  - Azul: Texturas naturais (alta variabilidade)")
             st.write("  - Vermelho: Texturas artificiais (baixa variabilidade)")
+            st.write("  - Retângulos roxos: Áreas com maior probabilidade de manipulação")
             
+        # Mostrar mapas detalhados se disponíveis
+        if "detailed_maps" in res and res["detailed_maps"]:
+            st.write("### Análise Detalhada por Métrica")
+            map_cols = st.columns(2)
+            
+            # Mostrar mapas individuais (variância, entropia, curtose, ruído)
+            map_titles = {
+                "variance_heatmap": "Variância (uniformidade)",
+                "entropy_heatmap": "Entropia (aleatoriedade)",
+                "kurtosis_heatmap": "Curtose (artificialidade)",
+                "noise_heatmap": "Consistência de Ruído"
+            }
+            
+            for i, (map_name, title) in enumerate(map_titles.items()):
+                if map_name in res["detailed_maps"]:
+                    with map_cols[i % 2]:
+                        st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+        
         # Adicionar ao relatório
         relatorio_dados.append({
             "Arquivo": res["nome"],
             "Score de Naturalidade": res["score"],
+            "Nível de Ruído": round(res.get("noise_level", 0) * 1000, 3),
             "Categoria": res["categoria"],
             "Percentual Suspeito (%)": round(res["percentual_suspeito"], 2)
         })
@@ -764,12 +923,20 @@ if modo_analise in ["Duplicidade", "Análise Completa"]:
 if modo_analise in ["Manipulação por IA", "Análise Completa"]:
     st.write("""
     **Análise de Manipulação por IA:**
-    - **Score 0-30**: Alta probabilidade de manipulação por IA
-    - **Score 31-70**: Textura suspeita, requer verificação manual
-    - **Score 71-100**: Textura natural, baixa probabilidade de manipulação
+    - **Score 0-40**: Alta probabilidade de manipulação por IA  
+    - **Score 41-75**: Textura suspeita, requer verificação manual
+    - **Score 76-100**: Textura natural, baixa probabilidade de manipulação
     
-    O mapa de calor mostra áreas com baixa variância de textura (vermelho) que são típicas 
+    **Como funciona:**
+    - **Análise multiescala**: Examina a imagem em diferentes níveis de zoom
+    - **Entropia**: Detecta falta de aleatoriedade natural em texturas
+    - **Variância**: Identifica uniformidade excessiva (típica de IA)
+    - **Consistência de ruído**: Identifica áreas com menos ruído que o restante da imagem
+    - **Curtose**: Detecta padrões artificialmente uniformes
+
+    O mapa de calor mostra áreas com baixa variância de textura (vermelho) típicas 
     de restaurações por IA, onde a textura é artificialmente uniforme.
+    Retângulos roxos destacam as áreas com maior probabilidade de manipulação.
     """)
 
 # Contato e informações
