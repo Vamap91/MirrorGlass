@@ -683,66 +683,66 @@ if uploaded_files:
                     # Gerar relatório
                     if df_relatorio is not None:
                         st.markdown("### 🔹 Relatório de Duplicatas")
-                        st.dataframe(df_relatorio)  
-                    
-                    # Opção para download do relatório
-                       nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-                       st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
-                                                    "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
-               else:
-                   st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
-           except Exception as e:
-               st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
-       
-       # Análise de manipulação por IA
-       if modo_analise in ["Manipulação por IA", "Análise Completa"]:
-           try:
-               st.markdown("## 🤖 Análise de Manipulação por IA")
-               resultados_textura = analisar_manipulacao_ia(
-                   imagens, 
-                   nomes, 
-                   limiar_naturalidade,
-                   tamanho_bloco,
-                   threshold_lbp
-               )
-               
-               # Exibir resultados
-               exibir_resultados_textura(resultados_textura)
-               
-           except Exception as e:
-               st.error(f"Erro durante a análise de textura: {str(e)}")
+                        st.dataframe(df_relatorio)
+                        
+                        # Opção para download do relatório
+                        nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+                        st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
+                                                     "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
+                else:
+                    st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+            except Exception as e:
+                st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
+        
+        # Análise de manipulação por IA
+        if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+            try:
+                st.markdown("## 🤖 Análise de Manipulação por IA")
+                resultados_textura = analisar_manipulacao_ia(
+                    imagens, 
+                    nomes, 
+                    limiar_naturalidade,
+                    tamanho_bloco,
+                    threshold_lbp
+                )
+                
+                # Exibir resultados
+                exibir_resultados_textura(resultados_textura)
+                
+            except Exception as e:
+                st.error(f"Erro durante a análise de textura: {str(e)}")
 else:
-   # Mostrar exemplo quando não há imagens carregadas
-   st.info("Faça upload de imagens para começar a detecção de fraudes.")
-   
-   # Adicionar imagens de exemplo
-   if st.button("🔍 Ver exemplos de detecção", key="ver_exemplos"):
-       st.write("### Exemplos de Análise de Textura")
-       
-       # Criar colunas para exibir os exemplos
-       col1, col2 = st.columns(2)
-       
-       with col1:
-           st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
-           st.write("Score de Naturalidade: 85")
-           st.success("✅ Textura Natural")
-           
-       with col2:
-           st.image("https://via.placeholder.com/400x300?text=Manipulada+por+IA", caption="Imagem Manipulada por IA")
-           st.write("Score de Naturalidade: 25")
-           st.error("⚠️ Alta chance de manipulação")
-           
-       st.write("### Exemplo de Detecção de Duplicidade")
-       
-       col1, col2 = st.columns(2)
-       
-       with col1:
-           st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
-           
-       with col2:
-           st.image("https://via.placeholder.com/400x300?text=Duplicata+Recortada", caption="Duplicata (Recortada)")
-           st.write("Similaridade: 0.78")
-           st.success("DUPLICATA DETECTADA")
+    # Mostrar exemplo quando não há imagens carregadas
+    st.info("Faça upload de imagens para começar a detecção de fraudes.")
+    
+    # Adicionar imagens de exemplo
+    if st.button("🔍 Ver exemplos de detecção", key="ver_exemplos"):
+        st.write("### Exemplos de Análise de Textura")
+        
+        # Criar colunas para exibir os exemplos
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
+            st.write("Score de Naturalidade: 85")
+            st.success("✅ Textura Natural")
+            
+        with col2:
+            st.image("https://via.placeholder.com/400x300?text=Manipulada+por+IA", caption="Imagem Manipulada por IA")
+            st.write("Score de Naturalidade: 25")
+            st.error("⚠️ Alta chance de manipulação")
+            
+        st.write("### Exemplo de Detecção de Duplicidade")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
+            
+        with col2:
+            st.image("https://via.placeholder.com/400x300?text=Duplicata+Recortada", caption="Duplicata (Recortada)")
+            st.write("Similaridade: 0.78")
+            st.success("DUPLICATA DETECTADA")
 
 # Rodapé
 st.markdown("---")
@@ -750,27 +750,27 @@ st.markdown("### Como interpretar os resultados")
 
 # Explicação sobre duplicidade
 if modo_analise in ["Duplicidade", "Análise Completa"]:
-   st.write("""
-   **Análise de Duplicidade:**
-   - **Similaridade 100%**: Imagens idênticas
-   - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
-   - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
-   - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
-   - **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
-   - **Similaridade <30%**: Provavelmente não são duplicatas
-   """)
+    st.write("""
+    **Análise de Duplicidade:**
+    - **Similaridade 100%**: Imagens idênticas
+    - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
+    - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
+    - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
+    - **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
+    - **Similaridade <30%**: Provavelmente não são duplicatas
+    """)
 
 # Explicação sobre análise de textura
 if modo_analise in ["Manipulação por IA", "Análise Completa"]:
-   st.write("""
-   **Análise de Manipulação por IA:**
-   - **Score 0-30**: Alta probabilidade de manipulação por IA
-   - **Score 31-70**: Textura suspeita, requer verificação manual
-   - **Score 71-100**: Textura natural, baixa probabilidade de manipulação
-   
-   O mapa de calor mostra áreas com baixa variância de textura (vermelho) que são típicas 
-   de restaurações por IA, onde a textura é artificialmente uniforme.
-   """)
+    st.write("""
+    **Análise de Manipulação por IA:**
+    - **Score 0-30**: Alta probabilidade de manipulação por IA
+    - **Score 31-70**: Textura suspeita, requer verificação manual
+    - **Score 71-100**: Textura natural, baixa probabilidade de manipulação
+    
+    O mapa de calor mostra áreas com baixa variância de textura (vermelho) que são típicas 
+    de restaurações por IA, onde a textura é artificialmente uniforme.
+    """)
 
 # Contato e informações
 st.sidebar.markdown("---")
