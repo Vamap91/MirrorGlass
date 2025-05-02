@@ -1122,7 +1122,7 @@ def exibir_resultados_textura(resultados):
                     st.write("  - Modificações em áreas pequenas ou limitadas")
         
         # Mostrar mapas detalhados se disponíveis
-        if "detailed_maps" in res and res["detailed_maps"]:
+        if "detailed_maps" in res and res["detailed_maps"] is not None and len(res["detailed_maps"]) > 0:
             with st.expander("Ver Análise Detalhada por Métrica"):
                 st.write("Cada mapa destaca um aspecto diferente da análise de textura:")
                 
@@ -1140,8 +1140,8 @@ def exibir_resultados_textura(resultados):
                 # Dividir em várias linhas de 2 colunas
                 maps_to_show = []
                 for map_name, title in map_titles.items():
-                    if map_name in res["detailed_maps"]:
-                        maps_to_show.append((map_name, title))
+                    if map_name in res["detailed_maps"] and res["detailed_maps"][map_name] is not None:
+                maps_to_show.append((map_name, title))
                 
                 # Mostrar em pares
                 for i in range(0, len(maps_to_show), 2):
@@ -1150,13 +1150,19 @@ def exibir_resultados_textura(resultados):
                     # Primeiro mapa do par
                     with map_cols[0]:
                         map_name, title = maps_to_show[i]
-                        st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
-                    
+                        if res["detailed_maps"][map_name] is not None:
+                            st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                        else:
+                            st.warning(f"Mapa de {title} não disponível")
+
                     # Segundo mapa do par (se houver)
                     if i + 1 < len(maps_to_show):
                         with map_cols[1]:
                             map_name, title = maps_to_show[i + 1]
-                            st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                            if res["detailed_maps"][map_name] is not None:
+                                st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                            else:
+                                st.warning(f"Mapa de {title} não disponível")
         
         # Adicionar ao relatório
         relatorio_dados.append({
