@@ -1141,7 +1141,7 @@ def exibir_resultados_textura(resultados):
                 maps_to_show = []
                 for map_name, title in map_titles.items():
                     if map_name in res["detailed_maps"] and res["detailed_maps"][map_name] is not None:
-                maps_to_show.append((map_name, title))
+                        maps_to_show.append((map_name, title))
                 
                 # Mostrar em pares
                 for i in range(0, len(maps_to_show), 2):
