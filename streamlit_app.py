@@ -1,4 +1,733 @@
-import streamlit as st
+def calcular_similaridade_ssim(img1, img2):
+   try:
+       # Garantir que as imagens tenham o mesmo tamanho
+       if img1.shape != img2.shape:
+           img2 = resize(img2, img1.shape)
+       
+       # Calcular SSIM com data_range especificado
+       score = ssim(img1, img2, data_range=1.0)
+       return score
+   except Exception as e:
+       st.error(f"Erro ao calcular similaridade SSIM: {e}")
+       return 0
+
+def calcular_similaridade_sift(img1_cv, img2_cv):
+   try:
+       # Converter para escala de cinza
+       img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+       img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
+       
+       # Inicializar o detector SIFT
+       sift = cv2.SIFT_create()
+       
+       # Detectar keypoints e descritores
+       kp1, des1 = sift.detectAndCompute(img1_gray, None)
+       kp2, des2 = sift.detectAndCompute(img2_gray, None)
+       
+       # Se não houver descritores suficientes, retorna 0
+       if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+           return 0
+           
+       # Usar o matcher FLANN
+       FLANN_INDEX_KDTREE = 1
+       index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+       search_params = dict(checks=50)
+       flann = cv2.FlannBasedMatcher(index_params, search_params)
+       
+       # Encontrar os 2 melhores matches para cada descritor
+       matches = flann.knnMatch(des1, des2, k=2)
+       
+       # Filtrar bons matches usando o teste de proporção de Lowe
+       good_matches = []
+       for m, n in matches:
+           if m.distance < 0.7 * n.distance:
+               good_matches.append(m)
+       
+       # Calcular a similaridade baseada no número de bons matches
+       max_matches = min(len(kp1), len(kp2))
+       if max_matches == 0:
+           return 0
+           
+       similarity = len(good_matches) / max_matches
+       
+       # Normalizar para evitar valores muito baixos
+       if similarity < 0.05:
+           adjusted_similarity = 0
+       else:
+           # Expandir valores pequenos para uma escala mais ampla
+           adjusted_similarity = min(1.0, similarity * 2)
+       
+       return adjusted_similarity
+       
+   except Exception as e:
+       st.error(f"Erro ao calcular similaridade SIFT: {e}")
+       return 0
+
+def calcular_similaridade_combinada(img1_gray, img2_gray, img1_cv, img2_cv):
+   try:
+       # Calcular similaridade usando ambos os métodos
+       sim_ssim = calcular_similaridade_ssim(img1_gray, img2_gray)
+       sim_sift = calcular_similaridade_sift(img1_cv, img2_cv)
+       
+       # A similaridade combinada é a média ponderada dos dois valores
+       # SIFT tem mais peso para detectar recortes
+       return (sim_ssim * 0.3) + (sim_sift * 0.7)
+   except Exception as e:
+       st.error(f"Erro ao calcular similaridade combinada: {e}")
+       return 0
+
+def get_csv_download_link(df, filename, text):
+   csv = df.to_csv(index=False)
+   b64 = base64.b64encode(csv.encode()).decode()
+   href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+   return href
+
+def get_image_download_link(img, filename, text):
+   # Converter para PIL Image se for numpy array
+   if isinstance(img, np.ndarray):
+       img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+   else:
+       img_pil = img
+       
+   # Salvar em buffer
+   buf = io.BytesIO()
+   img_pil.save(buf, format='JPEG')
+   buf.seek(0)
+   
+   # Codificar para base64
+   img_str = base64.b64encode(buf.read()).decode()
+   href = f'<a href="data:image/jpeg;base64,{img_str}" download="{filename}">{text}</a>'
+   
+   return href
+
+def visualizar_duplicatas(imagens, nomes, duplicatas, limiar):
+   if not duplicatas:
+       st.info("Nenhuma duplicata encontrada com o limiar de similaridade atual.")
+       return None
+   
+   # Criar DataFrame para relatório
+   relatorio_dados = []
+   
+   # Para cada grupo de duplicatas
+   for idx, (img_orig_idx, similares) in enumerate(duplicatas.items()):
+       st.write("---")
+       st.subheader(f"Grupo de Duplicatas #{idx+1}")
+       
+       # Layout para imagem original e suas duplicatas
+       cols = st.columns(min(len(similares) + 1, 4))  # Limita a 4 colunas por linha
+       
+       # Mostrar imagem original
+       with cols[0]:
+           st.image(imagens[img_orig_idx], caption=f"Original: {nomes[img_orig_idx]}", width=200)
+       
+       # Mostrar duplicatas
+       for i, (similar_idx, similaridade) in enumerate(similares):
+           col_index = (i + 1) % len(cols)
+           
+           # Se precisar de uma nova linha
+           if col_index == 0 and i > 0:
+               st.write("")  # Linha em branco
+               cols = st.columns(min(len(similares) - i + 1, 4))
+           
+           with cols[col_index]:
+               st.image(imagens[similar_idx], width=200)
+               caption = f"{nomes[similar_idx]}\nSimilaridade: {similaridade:.2f}"
+               st.caption(caption)
+               
+               # Destacar em verde se acima do limiar
+               if similaridade >= limiar:
+                   st.success("DUPLICATA DETECTADA")
+               
+               # Adicionar ao relatório
+               relatorio_dados.append({
+                   "Arquivo Original": nomes[img_orig_idx],
+                   "Arquivo Duplicado": nomes[similar_idx],
+                   "Similaridade (%)": round(similaridade * 100, 2)
+               })
+   
+   # Criar DataFrame do relatório
+   if relatorio_dados:
+       df_relatorio = pd.DataFrame(relatorio_dados)
+       return df_relatorio
+   return None
+
+# Função principal para detectar duplicatas
+def detectar_duplicatas(imagens, nomes, limiar=0.5):
+   # Mostrar progresso
+   progress_bar = st.progress(0)
+   status_text = st.empty()
+   
+   # Processar imagens
+   status_text.text("Extraindo características das imagens...")
+   arrays_processados_gray = []  # Para SSIM
+   arrays_processados_cv = []    # Para SIFT
+   indices_validos = []
+   
+   for i, img in enumerate(imagens):
+       # Atualizar barra de progresso
+       progress = (i + 1) / len(imagens)
+       progress_bar.progress(progress)
+       status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
+       
+       # Preprocessar imagem
+       img_array_gray, img_array_cv = preprocessar_imagem(img)
+       if img_array_gray is not None:
+           arrays_processados_gray.append(img_array_gray)
+           arrays_processados_cv.append(img_array_cv)
+           indices_validos.append(i)
+   
+   if not arrays_processados_gray:
+       status_text.error("Nenhuma imagem válida para processamento.")
+       progress_bar.empty()
+       return None
+   
+   # Calcular similaridades
+   status_text.text("Comparando imagens e buscando duplicatas...")
+   duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
+   
+   total_comparacoes = len(arrays_processados_gray) * (len(arrays_processados_gray) - 1) // 2
+   comparacao_atual = 0
+   
+   for i in range(len(arrays_processados_gray)):
+       similares = []
+       for j in range(len(arrays_processados_gray)):
+           # Não comparar uma imagem com ela mesma
+           if i != j:
+               comparacao_atual += 1
+               
+               # Atualizar progresso de maneira mais segura
+               if total_comparacoes > 0:
+                   # Certificar que o progresso sempre está entre 0 e 1
+                   progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
+                   progress_bar.progress(progress)
+               
+               # Calcular similaridade com método combinado SSIM + SIFT
+               similaridade = calcular_similaridade_combinada(
+                   arrays_processados_gray[i], 
+                   arrays_processados_gray[j],
+                   arrays_processados_cv[i], 
+                   arrays_processados_cv[j]
+               )
+               
+               # Se acima do limiar, adicionar como duplicata
+               if similaridade >= limiar:
+                   similares.append((indices_validos[j], similaridade))
+       
+       # Se encontrou duplicatas, adicionar à lista
+       if similares:
+           duplicatas[indices_validos[i]] = similares
+   
+   progress_bar.empty()
+   status_text.text("Processamento concluído!")
+   
+   return duplicatas
+
+# Funções para análise de manipulação por IA
+def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloco=16, threshold=0.35):
+    # Inicializar analisador de textura com parâmetros atualizados
+    analyzer = TextureAnalyzer(P=8, R=1, block_size=tamanho_bloco, threshold=threshold)
+    
+    # Mostrar progresso
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Resultados
+    resultados = []
+    
+    # Processar cada imagem individualmente
+    for i, img in enumerate(imagens):
+        # Atualizar barra de progresso
+        progress = (i + 1) / len(imagens)
+        progress_bar.progress(progress)
+        status_text.text(f"Analisando textura da imagem {i+1} de {len(imagens)}: {nomes[i]}")
+        
+        try:
+            # Analisar imagem individualmente
+            report = analyzer.analyze_image(img)
+            
+            # Validação adicional para garantir que report não é None
+            if report is None:
+                st.error(f"Erro crítico: analyze_image retornou None para {nomes[i]}")
+                resultados.append({
+                    "indice": i, 
+                    "nome": nomes[i], 
+                    "score": 0,
+                    "categoria": "Erro Crítico", 
+                    "descricao": "Falha interna na análise",
+                    "percentual_suspeito": 0,
+                    "visual_report": None, 
+                    "heatmap": None, 
+                    "detailed_maps": {},
+                    "analysis_results": {}
+                })
+                continue  # Pula para a próxima imagem
+            
+            # Adicionar informações ao relatório (agora com acesso mais seguro)
+            resultados.append({
+                "indice": i,
+                "nome": nomes[i],
+                "score": report.get("score", 0),
+                "categoria": report.get("category", "Erro"),
+                "descricao": report.get("description", "N/A"),
+                "percentual_suspeito": report.get("percentual_suspeito", 0),
+                "visual_report": report.get("visual_report"),
+                "heatmap": report.get("heatmap"),
+                "detailed_maps": report.get("detailed_maps", {}),
+                "analysis_results": report.get("analysis_results", {})
+            })
+        except Exception as e:
+            st.error(f"Erro ao analisar imagem {nomes[i]}: {str(e)}")
+            # Adicionar um relatório vazio para manter a consistência
+            resultados.append({
+                "indice": i,
+                "nome": nomes[i],
+                "score": 0,
+                "categoria": "Erro na análise",
+                "descricao": f"Erro: {str(e)}",
+                "percentual_suspeito": 0,
+                "visual_report": None,
+                "heatmap": None,
+                "detailed_maps": {},
+                "analysis_results": {}
+            })
+    
+    progress_bar.empty()
+    status_text.text("Análise de textura concluída!")
+    
+    return resultados
+
+# Função para extrair apenas dados essenciais da análise (sem mapas gigantes)
+def extrair_dados_essenciais(analysis_results):
+    """
+    Extrai apenas os dados essenciais da análise, removendo arrays grandes
+    """
+    if not analysis_results:
+        return {}
+    
+    dados_essenciais = {
+        "naturalness_score": analysis_results.get("naturalness_score", 0),
+        "percentage_suspicious": analysis_results.get("percentage_suspicious", 0),
+        "weights_used": analysis_results.get("weights", {}),
+    }
+    
+    # Adicionar estatísticas resumidas dos mapas (sem os arrays completos)
+    mapas_stats = {}
+    for nome_mapa in ["entropy_map", "variance_map", "gradient_map", "edge_map", 
+                      "blur_map", "flat_surface_map", "repetitive_map"]:
+        if nome_mapa in analysis_results:
+            mapa = analysis_results[nome_mapa]
+            if isinstance(mapa, np.ndarray) and mapa.size > 0:
+                mapas_stats[nome_mapa.replace("_map", "")] = {
+                    "media": float(np.mean(mapa)),
+                    "desvio_padrao": float(np.std(mapa)),
+                    "minimo": float(np.min(mapa)),
+                    "maximo": float(np.max(mapa)),
+                    "shape": list(mapa.shape)
+                }
+    
+    dados_essenciais["estatisticas_mapas"] = mapas_stats
+    
+    # Adicionar informações sobre regiões de veículo se disponível
+    if "vehicle_regions" in analysis_results:
+        vehicle_regions = analysis_results["vehicle_regions"]
+        if isinstance(vehicle_regions, np.ndarray):
+            dados_essenciais["analise_veiculo"] = {
+                "percentual_areas_veiculo": float(np.mean(vehicle_regions) * 100),
+                "total_regioes_detectadas": int(np.sum(vehicle_regions))
+            }
+    
+    return dados_essenciais
+
+# Função para converter numpy arrays para JSON
+def convert_numpy_to_list(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_to_list(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_list(item) for item in obj]
+    else:
+        return obj
+
+# Função para exibir resultados da análise de textura (INTERFACE VISUAL COMPLETA)
+def exibir_resultados_textura(resultados):
+    if not resultados:
+        st.info("Nenhum resultado de análise de textura disponível.")
+        return None
+    
+    # Criar DataFrame para relatório
+    relatorio_dados = []
+    
+    # Para cada imagem analisada
+    for res in resultados:
+        # Adicionar cabeçalho
+        st.write("---")
+        st.subheader(f"Análise de Textura: {res['nome']}")
+        
+        # Verificar se tivemos erro na análise
+        if res["visual_report"] is None:
+            st.error(f"❌ Erro na análise: {res['descricao']}")
+            continue
+        
+        # Layout para exibir resultados padrão
+        col1, col2 = st.columns(2)
+        
+        # Coluna 1: Imagem original e informações
+        with col1:
+            st.image(res["visual_report"], caption=f"Análise de Textura - {res['nome']}", use_column_width=True)
+            
+            # Adicionar métricas
+            st.metric("Score de Naturalidade", res["score"])
+            
+            # Status baseado no score
+            if res["score"] <= 45:
+                st.error(f"⚠️ {res['categoria']}: {res['descricao']}")
+            elif res["score"] <= 70:
+                st.warning(f"⚠️ {res['categoria']}: {res['descricao']}")
+            else:
+                st.success(f"✅ {res['categoria']}: {res['descricao']}")
+                
+            # Download da imagem analisada
+            st.markdown(
+                get_image_download_link(
+                    res["visual_report"], 
+                    f"analise_{res['nome'].replace(' ', '_')}.jpg",
+                    "📥 Baixar Imagem Analisada"
+                ),
+                unsafe_allow_html=True
+            )
+        
+        # Coluna 2: Mapa de calor e detalhes
+        with col2:
+            st.image(res["heatmap"], caption="Mapa de Calor LBP", use_column_width=True)
+            
+            st.write("### Detalhes da Análise")
+            st.write(f"- **Áreas suspeitas:** {res['percentual_suspeito']:.2f}% da imagem")
+            st.write(f"- **Interpretação:** {res['descricao']}")
+            st.write("- **Legenda do Mapa de Calor:**")
+            st.write("  - Azul: Texturas naturais (alta variabilidade)")
+            st.write("  - Vermelho: Texturas artificiais (baixa variabilidade)")
+            st.write("  - Retângulos roxos: Áreas com maior probabilidade de manipulação")
+        
+        # Mostrar mapas detalhados se disponíveis
+        if "detailed_maps" in res and res["detailed_maps"] is not None and len(res["detailed_maps"]) > 0:
+            with st.expander("Ver Análise Detalhada por Métrica"):
+                st.write("Cada mapa destaca um aspecto diferente da análise de textura:")
+                
+                # Mostrar mapas em pares (2 colunas)
+                map_titles = {
+                    "entropy_heatmap": "Entropia (aleatoriedade)",
+                    "variance_heatmap": "Variância (uniformidade)",
+                    "gradient_heatmap": "Gradiente (bordas)",
+                    "edge_heatmap": "Densidade de Bordas",
+                    "blur_heatmap": "Resposta ao Blur",
+                    "flat_surface_heatmap": "Superfícies Planas",
+                    "repetitive_heatmap": "Padrões Repetitivos"
+                }
+                
+                # Dividir em várias linhas de 2 colunas
+                maps_to_show = []
+                for map_name, title in map_titles.items():
+                    if map_name in res["detailed_maps"] and res["detailed_maps"][map_name] is not None:
+                        maps_to_show.append((map_name, title))
+                
+                # Mostrar em pares
+                for i in range(0, len(maps_to_show), 2):
+                    map_cols = st.columns(2)
+                    
+                    # Primeiro mapa do par
+                    with map_cols[0]:
+                        map_name, title = maps_to_show[i]
+                        if res["detailed_maps"][map_name] is not None:
+                            st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                        else:
+                            st.warning(f"Mapa de {title} não disponível")
+
+                    # Segundo mapa do par (se houver)
+                    if i + 1 < len(maps_to_show):
+                        with map_cols[1]:
+                            map_name, title = maps_to_show[i + 1]
+                            if res["detailed_maps"][map_name] is not None:
+                                st.image(res["detailed_maps"][map_name], caption=title, use_column_width=True)
+                            else:
+                                st.warning(f"Mapa de {title} não disponível")
+        
+        # Adicionar ao relatório
+        relatorio_dados.append({
+            "Arquivo": res["nome"],
+            "Score de Naturalidade": res["score"],
+            "Categoria": res["categoria"],
+            "Percentual Suspeito (%)": round(res["percentual_suspeito"], 2)
+        })
+    
+    # Criar DataFrame do relatório
+    if relatorio_dados:
+        st.write("---")
+        st.write("### Resumo da Análise de Textura")
+        df_relatorio = pd.DataFrame(relatorio_dados)
+        st.dataframe(df_relatorio)
+        
+        # Opção para download do relatório
+        nome_arquivo = f"relatorio_texturas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        st.markdown(
+            get_csv_download_link(df_relatorio, nome_arquivo, "📥 Baixar Relatório CSV"),
+            unsafe_allow_html=True
+        )
+        
+        return df_relatorio
+    return None
+
+# Função para exibir JSON adicional (quando solicitado)
+def exibir_json_adicional(dados, titulo):
+    with st.expander(f"📄 {titulo} - Dados JSON"):
+        # Preparar dados JSON otimizados
+        if "duplicidade" in dados:
+            dados_json = convert_numpy_to_list(dados)
+        else:
+            # Para análise de textura, usar dados essenciais
+            dados_otimizados = {}
+            for key, value in dados.items():
+                if key == "resultados":
+                    dados_otimizados[key] = []
+                    for resultado in value:
+                        item_otimizado = {
+                            "arquivo": resultado.get("arquivo", ""),
+                            "score_naturalidade": resultado.get("score_naturalidade", 0),
+                            "categoria": resultado.get("categoria", ""),
+                            "percentual_areas_suspeitas": resultado.get("percentual_areas_suspeitas", 0),
+                            "detalhes_analise": extrair_dados_essenciais(resultado.get("analysis_results", {}))
+                        }
+                        dados_otimizados[key].append(item_otimizado)
+                else:
+                    dados_otimizados[key] = value
+            dados_json = convert_numpy_to_list(dados_otimizados)
+        
+        # Mostrar JSON formatado
+        json_str = json.dumps(dados_json, indent=2, ensure_ascii=False)
+        st.code(json_str, language='json')
+        
+        # Botão para download do JSON
+        st.download_button(
+            label="📥 Baixar JSON",
+            data=json_str,
+            file_name=f"{titulo.lower().replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
+
+# Interface principal
+st.markdown("### 🔹 Passo 1: Carregar Imagens")
+uploaded_files = st.file_uploader(
+    "Faça upload das imagens para análise", 
+    accept_multiple_files=True,
+    type=['jpg', 'jpeg', 'png']
+)
+
+if uploaded_files:
+    st.write(f"✅ {len(uploaded_files)} imagens carregadas")
+    
+    # Criar botão para iniciar processamento
+    if st.button("🚀 Iniciar Análise", key="iniciar_analise"):
+        # Carregar imagens
+        imagens = []
+        nomes = []
+        
+        for arquivo in uploaded_files:
+            try:
+                img = Image.open(arquivo).convert('RGB')
+                imagens.append(img)
+                nomes.append(arquivo.name)
+            except Exception as e:
+                st.error(f"Erro ao abrir a imagem {arquivo.name}: {e}")
+        
+        # Processar de acordo com o modo selecionado
+        if modo_analise in ["Duplicidade", "Análise Completa"]:
+            try:
+                st.markdown("## 🔍 Análise de Duplicidade")
+                duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade)
+                
+                # Visualizar resultados de duplicidade (INTERFACE VISUAL COMPLETA)
+                if duplicatas:
+                    # Estatísticas
+                    total_duplicatas = sum(len(similares) for similares in duplicatas.values())
+                    st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
+                    
+                    # Visualizar duplicatas
+                    df_relatorio = visualizar_duplicatas(imagens, nomes, duplicatas, limiar_similaridade)
+                    
+                    # Gerar relatório
+                    if df_relatorio is not None:
+                        st.markdown("### 🔹 Relatório de Duplicatas")
+                        st.dataframe(df_relatorio)
+                        
+                        # Opção para download do relatório
+                        nome_arquivo = f"relatorio_duplicatas_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+                        st.markdown(get_csv_download_link(df_relatorio, nome_arquivo, 
+                                                     "📥 Baixar Relatório CSV"), unsafe_allow_html=True)
+                    
+                    # JSON adicional se solicitado
+                    if mostrar_json:
+                        # Preparar dados estruturados para JSON
+                        duplicatas_estruturadas = []
+                        for img_orig_idx, similares in duplicatas.items():
+                            grupo = {
+                                "imagem_original": {
+                                    "indice": img_orig_idx,
+                                    "nome": nomes[img_orig_idx]
+                                },
+                                "duplicatas_encontradas": [
+                                    {
+                                        "indice": similar_idx,
+                                        "nome": nomes[similar_idx],
+                                        "similaridade": float(similaridade),
+                                        "similaridade_percentual": round(similaridade * 100, 2)
+                                    }
+                                    for similar_idx, similaridade in similares
+                                ]
+                            }
+                            duplicatas_estruturadas.append(grupo)
+                        
+                        dados_duplicidade = {
+                            "metodo_usado": "SSIM + SIFT",
+                            "limiar_similaridade": limiar_similaridade,
+                            "total_grupos_duplicatas": len(duplicatas_estruturadas),
+                            "total_duplicatas_encontradas": sum(len(grupo["duplicatas_encontradas"]) for grupo in duplicatas_estruturadas),
+                            "grupos_duplicatas": duplicatas_estruturadas
+                        }
+                        
+                        exibir_json_adicional({"duplicidade": dados_duplicidade}, "Análise de Duplicidade")
+                        
+                else:
+                    st.warning("Nenhuma duplicata encontrada com o limiar atual. Tente reduzir o limiar de similaridade.")
+            except Exception as e:
+                st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
+        
+        # Análise de manipulação por IA
+        if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+            try:
+                st.markdown("## 🤖 Análise de Manipulação por IA")
+                resultados_textura = analisar_manipulacao_ia(
+                    imagens, 
+                    nomes, 
+                    limiar_naturalidade,
+                    tamanho_bloco,
+                    threshold_lbp
+                )
+                
+                # Exibir resultados (INTERFACE VISUAL COMPLETA)
+                df_relatorio_textura = exibir_resultados_textura(resultados_textura)
+                
+                # JSON adicional se solicitado
+                if mostrar_json:
+                    # Preparar dados estruturados para JSON
+                    analise_textura = {
+                        "parametros": {
+                            "limiar_naturalidade": limiar_naturalidade,
+                            "tamanho_bloco": tamanho_bloco,
+                            "threshold_lbp": threshold_lbp
+                        },
+                        "total_imagens_analisadas": len(resultados_textura),
+                        "resultados": []
+                    }
+                    
+                    for resultado in resultados_textura:
+                        item_estruturado = {
+                            "arquivo": resultado["nome"],
+                            "indice": resultado["indice"],
+                            "score_naturalidade": resultado["score"],
+                            "categoria": resultado["categoria"],
+                            "descricao": resultado["descricao"],
+                            "percentual_areas_suspeitas": round(resultado["percentual_suspeito"], 2),
+                            "analysis_results": resultado["analysis_results"]
+                        }
+                        analise_textura["resultados"].append(item_estruturado)
+                    
+                    exibir_json_adicional(analise_textura, "Análise de Manipulação por IA")
+                
+            except Exception as e:
+                st.error(f"Erro durante a análise de textura: {str(e)}")
+
+else:
+    # Mostrar exemplo quando não há imagens carregadas
+    st.info("Faça upload de imagens para começar a detecção de fraudes.")
+    
+    # Adicionar imagens de exemplo
+    if st.button("🔍 Ver exemplos de detecção", key="ver_exemplos"):
+        st.write("### Exemplos de Análise de Textura")
+        
+        # Criar colunas para exibir os exemplos
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
+            st.write("Score de Naturalidade: 85")
+            st.success("✅ Textura Natural")
+            
+        with col2:
+            st.image("https://via.placeholder.com/400x300?text=Manipulada+por+IA", caption="Imagem Manipulada por IA")
+            st.write("Score de Naturalidade: 25")
+            st.error("⚠️ Alta chance de manipulação")
+            
+        st.write("### Exemplo de Detecção de Duplicidade")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image("https://via.placeholder.com/400x300?text=Original", caption="Imagem Original")
+            
+        with col2:
+            st.image("https://via.placeholder.com/400x300?text=Duplicata+Recortada", caption="Duplicata (Recortada)")
+            st.write("Similaridade: 0.78")
+            st.success("DUPLICATA DETECTADA")
+
+# Rodapé
+st.markdown("---")
+st.markdown("### Como interpretar os resultados")
+
+# Explicação sobre duplicidade
+if modo_analise in ["Duplicidade", "Análise Completa"]:
+    st.write("""
+    **Análise de Duplicidade (SSIM + SIFT):**
+    - **Similaridade 100%**: Imagens idênticas
+    - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
+    - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
+    - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
+    - **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
+    - **Similaridade <30%**: Provavelmente não são duplicatas
+    """)
+
+# Explicação sobre análise de textura
+if modo_analise in ["Manipulação por IA", "Análise Completa"]:
+    st.write("""
+    **Análise de Manipulação por IA:**
+    - **Score 0-45**: Alta probabilidade de manipulação por IA  
+    - **Score 46-70**: Textura suspeita, requer verificação manual
+    - **Score 71-100**: Textura natural, baixa probabilidade de manipulação
+    
+    **Como funciona:**
+    - **Análise multiescala**: Examina a imagem em diferentes níveis de zoom
+    - **Entropia**: Detecta falta de aleatoriedade natural em texturas
+    - **Variância**: Identifica uniformidade excessiva (típica de IA)
+    - **Densidade de bordas**: Áreas manipuladas têm menos bordas naturais
+    - **Resposta ao blur**: Texturas reais respondem de forma diferente ao borramento
+    - **Superfícies planas**: Detecta áreas grandes com textura artificial uniforme
+
+    O mapa de calor mostra áreas com baixa variância de textura (vermelho) típicas 
+    de restaurações por IA, onde a textura é artificialmente uniforme.
+    Retângulos roxos destacam as áreas com maior probabilidade de manipulação.
+    """)
+
+# Contato e informações
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**Desenvolvido para:** Mirror Glass
+**Projeto:** Detecção de Fraudes em Imagens Automotivas
+**Versão:** 1.2.0 (Junho/2025)
+**Método Duplicidade:** SSIM + SIFT
+""")import streamlit as st
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -310,6 +1039,27 @@ class TextureAnalyzer:
             cv2.COLORMAP_JET
         )
         
+        # Criar mapas individuais para visualização
+        # Normalizar e converter para mapa de calor
+        def create_heatmap(data):
+            norm_data = cv2.normalize(data, None, 0, 1, cv2.NORM_MINMAX)
+            return cv2.applyColorMap((norm_data * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        
+        # Criar heatmaps com tratamento de erro
+        try:
+            entropy_heatmap = create_heatmap(entropy_map)
+            variance_heatmap = create_heatmap(variance_map)
+            gradient_heatmap = create_heatmap(gradient_consistency_map)
+            edge_heatmap = create_heatmap(edge_density_map)
+            blur_heatmap = create_heatmap(blur_consistency_map)
+            flat_surface_heatmap = create_heatmap(flat_surface_map)
+            repetitive_heatmap = create_heatmap(repetitive_pattern_map)
+        except Exception as e:
+            # Em caso de erro, criar mapas de calor vazios
+            empty_map = np.zeros((10, 10, 3), dtype=np.uint8)
+            entropy_heatmap = variance_heatmap = gradient_heatmap = edge_heatmap = empty_map
+            blur_heatmap = flat_surface_heatmap = repetitive_heatmap = empty_map
+        
         return {
             "naturalness_map": norm_naturalness_map,
             "suspicious_mask": suspicious_mask,
@@ -322,6 +1072,13 @@ class TextureAnalyzer:
             "blur_map": blur_consistency_map,
             "flat_surface_map": flat_surface_map,
             "repetitive_map": repetitive_pattern_map,
+            "entropy_heatmap": entropy_heatmap,
+            "variance_heatmap": variance_heatmap,
+            "gradient_heatmap": gradient_heatmap,
+            "edge_heatmap": edge_heatmap,
+            "blur_heatmap": blur_heatmap,
+            "flat_surface_heatmap": flat_surface_heatmap,
+            "repetitive_heatmap": repetitive_heatmap,
             "weights": weights,
             "vehicle_regions": vehicle_regions,
             "percentage_suspicious": float(np.mean(suspicious_mask) * 100)
@@ -338,6 +1095,77 @@ class TextureAnalyzer:
         else:
             return "Textura natural", "Baixa chance de manipulação"
     
+    def generate_visual_report(self, image, analysis_results):
+        # Converter para numpy se for PIL
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
+        
+        # Extrair resultados
+        naturalness_map = analysis_results["naturalness_map"]
+        suspicious_mask = analysis_results["suspicious_mask"]
+        score = analysis_results["naturalness_score"]
+        
+        # Redimensionar para o tamanho da imagem original
+        height, width = image.shape[:2]
+        
+        # Redimensionar naturalness_map e suspicious_mask
+        naturalness_map_resized = cv2.resize(naturalness_map, 
+                                           (width, height), 
+                                           interpolation=cv2.INTER_LINEAR)
+        
+        mask_resized = cv2.resize(suspicious_mask.astype(np.uint8), 
+                                 (width, height), 
+                                 interpolation=cv2.INTER_NEAREST)
+        
+        # Criar mapa de calor
+        heatmap = cv2.applyColorMap((naturalness_map_resized * 255).astype(np.uint8), 
+                                    cv2.COLORMAP_JET)
+        
+        # Criar overlay com 40% de transparência
+        overlay = cv2.addWeighted(image, 0.6, heatmap, 0.4, 0)
+        
+        # Destacar áreas suspeitas com contorno
+        highlighted = overlay.copy()
+        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, 
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Desenhar retângulos em áreas suspeitas maiores
+        for contour in contours:
+            # Filtrar contornos muito pequenos (ruído)
+            area = cv2.contourArea(contour)
+            if area > 50:  # Reduzido para detectar áreas menores
+                x, y, w, h = cv2.boundingRect(contour)
+                # Desenhar retângulo roxo
+                cv2.rectangle(highlighted, (x, y), (x+w, y+h), (128, 0, 128), 2)
+        
+        # Classificar resultado
+        category, description = self.classify_naturalness(score)
+        
+        # Adicionar informações na imagem
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(highlighted, f"Score: {score}/100", (10, 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(highlighted, category, (10, 60), font, 0.7, (255, 255, 255), 2)
+        
+        # Criar visualização de mapas individuais
+        detailed_maps = {}
+        map_names = [
+            "entropy_heatmap", "variance_heatmap", "gradient_heatmap", 
+            "edge_heatmap", "blur_heatmap", "flat_surface_heatmap", "repetitive_heatmap"
+        ]
+        
+        for map_name in map_names:
+            if map_name in analysis_results:
+                map_data = analysis_results[map_name]
+                if map_data is not None and map_data.size > 0:
+                    try:
+                        map_resized = cv2.resize(map_data, (width, height), 
+                                               interpolation=cv2.INTER_LINEAR)
+                        detailed_maps[map_name] = map_resized
+                    except Exception as e:
+                        pass  # Ignora mapas com problemas
+        
+        return highlighted, heatmap, detailed_maps
+    
     def analyze_image(self, image):
         # Inicializa um relatório padrão com valores seguros
         report = {
@@ -345,6 +1173,9 @@ class TextureAnalyzer:
             "category": "Erro",
             "description": "Falha na análise inicial",
             "percentual_suspeito": 0,
+            "visual_report": None,
+            "heatmap": None,
+            "detailed_maps": {},
             "analysis_results": {}
         }
         
@@ -354,6 +1185,12 @@ class TextureAnalyzer:
             if analysis_results is None:
                 raise ValueError("analyze_texture_variance retornou None")
             report["analysis_results"] = analysis_results
+
+            # Gerar visualização
+            visual_report, heatmap, detailed_maps = self.generate_visual_report(image, analysis_results)
+            report["visual_report"] = visual_report
+            report["heatmap"] = heatmap
+            report["detailed_maps"] = detailed_maps if detailed_maps is not None else {}
 
             # Classificar o resultado
             score = analysis_results.get("naturalness_score", 0)
@@ -427,12 +1264,12 @@ if modo_analise in ["Manipulação por IA", "Análise Completa"]:
        help="Limiar para detecção de áreas suspeitas (menor = mais sensível)"
    )
 
-# Opção para formato de saída
-st.sidebar.subheader("Formato de Saída")
-formato_saida = st.sidebar.radio(
-    "Escolha o formato de resultado",
-    ["Interface Visual", "JSON Puro"],
-    help="Interface Visual mostra os resultados na tela, JSON Puro retorna apenas os dados da análise"
+# Opção para exibir JSON adicional
+st.sidebar.subheader("Opções Avançadas")
+mostrar_json = st.sidebar.checkbox(
+    "📄 Exibir JSON dos Resultados",
+    value=False,
+    help="Mostra os dados JSON estruturados além da interface visual"
 )
 
 # Funções para processamento de imagens - DUPLICIDADE
@@ -464,508 +1301,4 @@ def calcular_similaridade_ssim(img1, img2):
        score = ssim(img1, img2, data_range=1.0)
        return score
    except Exception as e:
-       st.error(f"Erro ao calcular similaridade SSIM: {e}")
-       return 0
-
-def calcular_similaridade_sift(img1_cv, img2_cv):
-   try:
-       # Converter para escala de cinza
-       img1_gray = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
-       img2_gray = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
-       
-       # Inicializar o detector SIFT
-       sift = cv2.SIFT_create()
-       
-       # Detectar keypoints e descritores
-       kp1, des1 = sift.detectAndCompute(img1_gray, None)
-       kp2, des2 = sift.detectAndCompute(img2_gray, None)
-       
-       # Se não houver descritores suficientes, retorna 0
-       if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-           return 0
-           
-       # Usar o matcher FLANN
-       FLANN_INDEX_KDTREE = 1
-       index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-       search_params = dict(checks=50)
-       flann = cv2.FlannBasedMatcher(index_params, search_params)
-       
-       # Encontrar os 2 melhores matches para cada descritor
-       matches = flann.knnMatch(des1, des2, k=2)
-       
-       # Filtrar bons matches usando o teste de proporção de Lowe
-       good_matches = []
-       for m, n in matches:
-           if m.distance < 0.7 * n.distance:
-               good_matches.append(m)
-       
-       # Calcular a similaridade baseada no número de bons matches
-       max_matches = min(len(kp1), len(kp2))
-       if max_matches == 0:
-           return 0
-           
-       similarity = len(good_matches) / max_matches
-       
-       # Normalizar para evitar valores muito baixos
-       if similarity < 0.05:
-           adjusted_similarity = 0
-       else:
-           # Expandir valores pequenos para uma escala mais ampla
-           adjusted_similarity = min(1.0, similarity * 2)
-       
-       return adjusted_similarity
-       
-   except Exception as e:
-       st.error(f"Erro ao calcular similaridade SIFT: {e}")
-       return 0
-
-def calcular_similaridade_combinada(img1_gray, img2_gray, img1_cv, img2_cv):
-   try:
-       # Calcular similaridade usando ambos os métodos
-       sim_ssim = calcular_similaridade_ssim(img1_gray, img2_gray)
-       sim_sift = calcular_similaridade_sift(img1_cv, img2_cv)
-       
-       # A similaridade combinada é a média ponderada dos dois valores
-       # SIFT tem mais peso para detectar recortes
-       return (sim_ssim * 0.3) + (sim_sift * 0.7)
-   except Exception as e:
-       st.error(f"Erro ao calcular similaridade combinada: {e}")
-       return 0
-
-def detectar_duplicatas(imagens, nomes, limiar=0.5):
-   # Mostrar progresso
-   progress_bar = st.progress(0)
-   status_text = st.empty()
-   
-   # Processar imagens
-   status_text.text("Extraindo características das imagens...")
-   arrays_processados_gray = []  # Para SSIM
-   arrays_processados_cv = []    # Para SIFT
-   indices_validos = []
-   
-   for i, img in enumerate(imagens):
-       # Atualizar barra de progresso
-       progress = (i + 1) / len(imagens)
-       progress_bar.progress(progress)
-       status_text.text(f"Processando imagem {i+1} de {len(imagens)}: {nomes[i]}")
-       
-       # Preprocessar imagem
-       img_array_gray, img_array_cv = preprocessar_imagem(img)
-       if img_array_gray is not None:
-           arrays_processados_gray.append(img_array_gray)
-           arrays_processados_cv.append(img_array_cv)
-           indices_validos.append(i)
-   
-   if not arrays_processados_gray:
-       status_text.error("Nenhuma imagem válida para processamento.")
-       progress_bar.empty()
-       return None
-   
-   # Calcular similaridades
-   status_text.text("Comparando imagens e buscando duplicatas...")
-   duplicatas = {}  # {índice_original: [(índice_similar, similaridade), ...]}
-   
-   total_comparacoes = len(arrays_processados_gray) * (len(arrays_processados_gray) - 1) // 2
-   comparacao_atual = 0
-   
-   for i in range(len(arrays_processados_gray)):
-       similares = []
-       for j in range(len(arrays_processados_gray)):
-           # Não comparar uma imagem com ela mesma
-           if i != j:
-               comparacao_atual += 1
-               
-               # Atualizar progresso de maneira mais segura
-               if total_comparacoes > 0:
-                   # Certificar que o progresso sempre está entre 0 e 1
-                   progress = min(max(comparacao_atual / total_comparacoes, 0.0), 1.0)
-                   progress_bar.progress(progress)
-               
-               # Calcular similaridade com método combinado SSIM + SIFT
-               similaridade = calcular_similaridade_combinada(
-                   arrays_processados_gray[i], 
-                   arrays_processados_gray[j],
-                   arrays_processados_cv[i], 
-                   arrays_processados_cv[j]
-               )
-               
-               # Se acima do limiar, adicionar como duplicata
-               if similaridade >= limiar:
-                   similares.append((indices_validos[j], similaridade))
-       
-       # Se encontrou duplicatas, adicionar à lista
-       if similares:
-           duplicatas[indices_validos[i]] = similares
-   
-   progress_bar.empty()
-   status_text.text("Processamento concluído!")
-   
-   return duplicatas
-
-# Funções para análise de manipulação por IA
-def analisar_manipulacao_ia(imagens, nomes, limiar_naturalidade=50, tamanho_bloco=16, threshold=0.35):
-    # Inicializar analisador de textura com parâmetros atualizados
-    analyzer = TextureAnalyzer(P=8, R=1, block_size=tamanho_bloco, threshold=threshold)
-    
-    # Mostrar progresso
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Resultados
-    resultados = []
-    
-    # Processar cada imagem individualmente
-    for i, img in enumerate(imagens):
-        # Atualizar barra de progresso
-        progress = (i + 1) / len(imagens)
-        progress_bar.progress(progress)
-        status_text.text(f"Analisando textura da imagem {i+1} de {len(imagens)}: {nomes[i]}")
-        
-        try:
-            # Analisar imagem individualmente
-            report = analyzer.analyze_image(img)
-            
-            # Validação adicional para garantir que report não é None
-            if report is None:
-                st.error(f"Erro crítico: analyze_image retornou None para {nomes[i]}")
-                resultados.append({
-                    "indice": i, 
-                    "nome": nomes[i], 
-                    "score": 0,
-                    "categoria": "Erro Crítico", 
-                    "descricao": "Falha interna na análise",
-                    "percentual_suspeito": 0,
-                    "analysis_results": {}
-                })
-                continue  # Pula para a próxima imagem
-            
-            # Adicionar informações ao relatório (agora com acesso mais seguro)
-            resultados.append({
-                "indice": i,
-                "nome": nomes[i],
-                "score": report.get("score", 0),
-                "categoria": report.get("category", "Erro"),
-                "descricao": report.get("description", "N/A"),
-                "percentual_suspeito": report.get("percentual_suspeito", 0),
-                "analysis_results": report.get("analysis_results", {})
-            })
-        except Exception as e:
-            st.error(f"Erro ao analisar imagem {nomes[i]}: {str(e)}")
-            # Adicionar um relatório vazio para manter a consistência
-            resultados.append({
-                "indice": i,
-                "nome": nomes[i],
-                "score": 0,
-                "categoria": "Erro na análise",
-                "descricao": f"Erro: {str(e)}",
-                "percentual_suspeito": 0,
-                "analysis_results": {}
-            })
-    
-    progress_bar.empty()
-    status_text.text("Análise de textura concluída!")
-    
-    return resultados
-
-# Função para converter numpy arrays para listas (para JSON)
-def convert_numpy_to_list(obj):
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, dict):
-        return {k: convert_numpy_to_list(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_numpy_to_list(item) for item in obj]
-    else:
-        return obj
-
-# Função para exibir JSON puro
-def exibir_json_puro(dados, tipo_analise):
-    st.subheader(f"📄 Resultado JSON - {tipo_analise}")
-    
-    # Converter numpy arrays para listas
-    dados_json = convert_numpy_to_list(dados)
-    
-    # Mostrar JSON formatado
-    json_str = json.dumps(dados_json, indent=2, ensure_ascii=False)
-    st.code(json_str, language='json')
-    
-    # Botão para download do JSON
-    st.download_button(
-        label="📥 Baixar JSON",
-        data=json_str,
-        file_name=f"analise_{tipo_analise.lower().replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M%S')}.json",
-        mime="application/json"
-    )
-
-# Função para exibir interface visual (simplificada)
-def exibir_interface_visual(dados, tipo_analise):
-    if tipo_analise == "Duplicidade":
-        if dados:
-            # Estatísticas
-            total_duplicatas = sum(len(similares) for similares in dados.values())
-            st.metric("Total de possíveis duplicatas encontradas", total_duplicatas)
-            st.success("✅ Duplicatas detectadas! Verifique os detalhes no JSON.")
-        else:
-            st.warning("Nenhuma duplicata encontrada com o limiar atual.")
-            
-    elif tipo_analise == "Manipulação por IA":
-        if dados:
-            # Resumo dos resultados
-            total_imagens = len(dados)
-            manipuladas = sum(1 for item in dados if item["score"] <= 45)
-            suspeitas = sum(1 for item in dados if 45 < item["score"] <= 70)
-            naturais = sum(1 for item in dados if item["score"] > 70)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total de Imagens", total_imagens)
-            with col2:
-                st.metric("Manipuladas", manipuladas)
-            with col3:
-                st.metric("Suspeitas", suspeitas)
-            with col4:
-                st.metric("Naturais", naturais)
-            
-            # Lista resumida dos resultados
-            st.subheader("Resumo da Análise")
-            for item in dados:
-                score = item["score"]
-                nome = item["nome"]
-                
-                if score <= 45:
-                    st.error(f"⚠️ {nome}: Score {score} - {item['categoria']}")
-                elif score <= 70:
-                    st.warning(f"⚠️ {nome}: Score {score} - {item['categoria']}")
-                else:
-                    st.success(f"✅ {nome}: Score {score} - {item['categoria']}")
-
-# Interface principal
-st.markdown("### 🔹 Passo 1: Carregar Imagens")
-uploaded_files = st.file_uploader(
-    "Faça upload das imagens para análise", 
-    accept_multiple_files=True,
-    type=['jpg', 'jpeg', 'png']
-)
-
-if uploaded_files:
-    st.write(f"✅ {len(uploaded_files)} imagens carregadas")
-    
-    # Criar botão para iniciar processamento
-    if st.button("🚀 Iniciar Análise", key="iniciar_analise"):
-        # Carregar imagens
-        imagens = []
-        nomes = []
-        
-        for arquivo in uploaded_files:
-            try:
-                img = Image.open(arquivo).convert('RGB')
-                imagens.append(img)
-                nomes.append(arquivo.name)
-            except Exception as e:
-                st.error(f"Erro ao abrir a imagem {arquivo.name}: {e}")
-        
-        resultados_finais = {}
-        
-        # Processar de acordo com o modo selecionado
-        if modo_analise in ["Duplicidade", "Análise Completa"]:
-            try:
-                st.markdown("## 🔍 Análise de Duplicidade")
-                duplicatas = detectar_duplicatas(imagens, nomes, limiar_similaridade)
-                
-                # Preparar dados estruturados para JSON
-                duplicatas_estruturadas = []
-                if duplicatas:
-                    for img_orig_idx, similares in duplicatas.items():
-                        grupo = {
-                            "imagem_original": {
-                                "indice": img_orig_idx,
-                                "nome": nomes[img_orig_idx]
-                            },
-                            "duplicatas_encontradas": [
-                                {
-                                    "indice": similar_idx,
-                                    "nome": nomes[similar_idx],
-                                    "similaridade": float(similaridade),
-                                    "similaridade_percentual": round(similaridade * 100, 2)
-                                }
-                                for similar_idx, similaridade in similares
-                            ]
-                        }
-                        duplicatas_estruturadas.append(grupo)
-                
-                resultados_finais["duplicidade"] = {
-                    "metodo_usado": "SSIM + SIFT",
-                    "limiar_similaridade": limiar_similaridade,
-                    "total_grupos_duplicatas": len(duplicatas_estruturadas),
-                    "total_duplicatas_encontradas": sum(len(grupo["duplicatas_encontradas"]) for grupo in duplicatas_estruturadas),
-                    "grupos_duplicatas": duplicatas_estruturadas
-                }
-                
-                # Exibir conforme formato escolhido
-                if formato_saida == "JSON Puro":
-                    exibir_json_puro(resultados_finais["duplicidade"], "Duplicidade")
-                else:
-                    exibir_interface_visual(duplicatas, "Duplicidade")
-                    
-            except Exception as e:
-                st.error(f"Erro durante a detecção de duplicatas: {str(e)}")
-        
-        # Análise de manipulação por IA
-        if modo_analise in ["Manipulação por IA", "Análise Completa"]:
-            try:
-                st.markdown("## 🤖 Análise de Manipulação por IA")
-                resultados_textura = analisar_manipulacao_ia(
-                    imagens, 
-                    nomes, 
-                    limiar_naturalidade,
-                    tamanho_bloco,
-                    threshold_lbp
-                )
-                
-                # Preparar dados estruturados para JSON
-                analise_textura = {
-                    "parametros": {
-                        "limiar_naturalidade": limiar_naturalidade,
-                        "tamanho_bloco": tamanho_bloco,
-                        "threshold_lbp": threshold_lbp
-                    },
-                    "total_imagens_analisadas": len(resultados_textura),
-                    "resultados": []
-                }
-                
-                for resultado in resultados_textura:
-                    item_estruturado = {
-                        "arquivo": resultado["nome"],
-                        "indice": resultado["indice"],
-                        "score_naturalidade": resultado["score"],
-                        "categoria": resultado["categoria"],
-                        "descricao": resultado["descricao"],
-                        "percentual_areas_suspeitas": round(resultado["percentual_suspeito"], 2),
-                        "detalhes_analise": resultado["analysis_results"]
-                    }
-                    analise_textura["resultados"].append(item_estruturado)
-                
-                resultados_finais["manipulacao_ia"] = analise_textura
-                
-                # Exibir conforme formato escolhido
-                if formato_saida == "JSON Puro":
-                    exibir_json_puro(resultados_finais["manipulacao_ia"], "Manipulação por IA")
-                else:
-                    exibir_interface_visual(resultados_textura, "Manipulação por IA")
-                    
-            except Exception as e:
-                st.error(f"Erro durante a análise de textura: {str(e)}")
-        
-        # Se é análise completa e formato JSON, mostrar tudo junto
-        if modo_analise == "Análise Completa" and formato_saida == "JSON Puro":
-            st.markdown("## 📊 Resultado Completo")
-            resultado_completo = {
-                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                "modo_analise": modo_analise,
-                "total_imagens_processadas": len(nomes),
-                "nomes_arquivos": nomes,
-                **resultados_finais
-            }
-            exibir_json_puro(resultado_completo, "Análise Completa")
-
-else:
-    # Mostrar exemplo quando não há imagens carregadas
-    st.info("Faça upload de imagens para começar a detecção de fraudes.")
-    
-    if st.button("🔍 Ver exemplo de JSON", key="ver_exemplo_json"):
-        exemplo_json = {
-            "timestamp": "2025-06-06 14:30:00",
-            "modo_analise": "Análise Completa",
-            "total_imagens_processadas": 2,
-            "nomes_arquivos": ["exemplo1.jpg", "exemplo2.jpg"],
-            "duplicidade": {
-                "metodo_usado": "SSIM + SIFT",
-                "limiar_similaridade": 0.5,
-                "total_grupos_duplicatas": 1,
-                "total_duplicatas_encontradas": 1,
-                "grupos_duplicatas": [
-                    {
-                        "imagem_original": {
-                            "indice": 0,
-                            "nome": "exemplo1.jpg"
-                        },
-                        "duplicatas_encontradas": [
-                            {
-                                "indice": 1,
-                                "nome": "exemplo2.jpg",
-                                "similaridade": 0.85,
-                                "similaridade_percentual": 85.0
-                            }
-                        ]
-                    }
-                ]
-            },
-            "manipulacao_ia": {
-                "parametros": {
-                    "limiar_naturalidade": 50,
-                    "tamanho_bloco": 16,
-                    "threshold_lbp": 0.35
-                },
-                "total_imagens_analisadas": 2,
-                "resultados": [
-                    {
-                        "arquivo": "exemplo1.jpg",
-                        "indice": 0,
-                        "score_naturalidade": 75,
-                        "categoria": "Textura natural",
-                        "descricao": "Baixa chance de manipulação",
-                        "percentual_areas_suspeitas": 5.2
-                    },
-                    {
-                        "arquivo": "exemplo2.jpg",
-                        "indice": 1,
-                        "score_naturalidade": 35,
-                        "categoria": "Alta chance de manipulação",
-                        "descricao": "Textura artificial detectada",
-                        "percentual_areas_suspeitas": 45.8
-                    }
-                ]
-            }
-        }
-        
-        st.subheader("📄 Exemplo de JSON de Saída")
-        json_str = json.dumps(exemplo_json, indent=2, ensure_ascii=False)
-        st.code(json_str, language='json')
-
-# Rodapé
-st.markdown("---")
-st.markdown("### Como interpretar os resultados")
-
-# Explicação sobre duplicidade
-if modo_analise in ["Duplicidade", "Análise Completa"]:
-    st.write("""
-    **Análise de Duplicidade (SSIM + SIFT):**
-    - **Similaridade 100%**: Imagens idênticas
-    - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
-    - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
-    - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
-    - **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
-    - **Similaridade <30%**: Provavelmente não são duplicatas
-    """)
-
-# Explicação sobre análise de textura
-if modo_analise in ["Manipulação por IA", "Análise Completa"]:
-    st.write("""
-    **Análise de Manipulação por IA:**
-    - **Score 0-45**: Alta probabilidade de manipulação por IA  
-    - **Score 46-70**: Textura suspeita, requer verificação manual
-    - **Score 71-100**: Textura natural, baixa probabilidade de manipulação
-    """)
-
-# Contato e informações
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**Desenvolvido para:** Mirror Glass
-**Projeto:** Detecção de Fraudes em Imagens Automotivas
-**Versão:** 1.2.0 (Junho/2025)
-**Método Duplicidade:** SSIM + SIFT
-""")
+       st.error(f"
