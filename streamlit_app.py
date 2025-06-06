@@ -1,16 +1,3 @@
-def calcular_similaridade_ssim(img1, img2):
-   try:
-       # Garantir que as imagens tenham o mesmo tamanho
-       if img1.shape != img2.shape:
-           img2 = resize(img2, img1.shape)
-       
-       # Calcular SSIM com data_range especificado
-       score = ssim(img1, img2, data_range=1.0)
-       return score
-   except Exception as e:
-       st.error(f"Erro ao calcular similaridade SSIM: {e}")
-       return 0
-
 def calcular_similaridade_sift(img1_cv, img2_cv):
    try:
        # Converter para escala de cinza
@@ -485,26 +472,7 @@ def exibir_resultados_textura(resultados):
 def exibir_json_adicional(dados, titulo):
     with st.expander(f"📄 {titulo} - Dados JSON"):
         # Preparar dados JSON otimizados
-        if "duplicidade" in dados:
-            dados_json = convert_numpy_to_list(dados)
-        else:
-            # Para análise de textura, usar dados essenciais
-            dados_otimizados = {}
-            for key, value in dados.items():
-                if key == "resultados":
-                    dados_otimizados[key] = []
-                    for resultado in value:
-                        item_otimizado = {
-                            "arquivo": resultado.get("arquivo", ""),
-                            "score_naturalidade": resultado.get("score_naturalidade", 0),
-                            "categoria": resultado.get("categoria", ""),
-                            "percentual_areas_suspeitas": resultado.get("percentual_areas_suspeitas", 0),
-                            "detalhes_analise": extrair_dados_essenciais(resultado.get("analysis_results", {}))
-                        }
-                        dados_otimizados[key].append(item_otimizado)
-                else:
-                    dados_otimizados[key] = value
-            dados_json = convert_numpy_to_list(dados_otimizados)
+        dados_json = convert_numpy_to_list(dados)
         
         # Mostrar JSON formatado
         json_str = json.dumps(dados_json, indent=2, ensure_ascii=False)
@@ -641,7 +609,7 @@ if uploaded_files:
                             "categoria": resultado["categoria"],
                             "descricao": resultado["descricao"],
                             "percentual_areas_suspeitas": round(resultado["percentual_suspeito"], 2),
-                            "analysis_results": resultado["analysis_results"]
+                            "detalhes_analise": extrair_dados_essenciais(resultado["analysis_results"])
                         }
                         analise_textura["resultados"].append(item_estruturado)
                     
@@ -691,8 +659,6 @@ st.markdown("### Como interpretar os resultados")
 if modo_analise in ["Duplicidade", "Análise Completa"]:
     st.write("""
     **Análise de Duplicidade (SSIM + SIFT):**
-    - **Similaridade 100%**: Imagens idênticas
-    - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
     - **Similaridade 70-90%**: Muito semelhantes (potenciais duplicatas)
     - **Similaridade 50-70%**: Semelhantes (verificar manualmente)
     - **Similaridade 30-50%**: Possivelmente relacionadas (verificar com atenção)
@@ -727,7 +693,9 @@ st.sidebar.info("""
 **Projeto:** Detecção de Fraudes em Imagens Automotivas
 **Versão:** 1.2.0 (Junho/2025)
 **Método Duplicidade:** SSIM + SIFT
-""")import streamlit as st
+""")Similaridade 100%**: Imagens idênticas
+    - **Similaridade >90%**: Praticamente idênticas (possivelmente recortadas ou com filtros)
+    - **import streamlit as st
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1301,4 +1269,7 @@ def calcular_similaridade_ssim(img1, img2):
        score = ssim(img1, img2, data_range=1.0)
        return score
    except Exception as e:
-       st.error(f"
+       st.error(f"Erro ao calcular similaridade SSIM: {e}")
+       return 0
+
+def
