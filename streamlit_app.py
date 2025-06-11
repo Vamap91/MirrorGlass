@@ -923,7 +923,7 @@ def exibir_resultados_textura(resultados):
                 st.warning(f"⚠️ **ÁREAS SUSPEITAS: {percentual:.2f}% da imagem** - ATENÇÃO!")
             else:
                 st.write(f"- **Áreas suspeitas:** {percentual:.2f}% da imagem")
-             st.write(f"- **Interpretação:** {res['descricao']}")
+            st.write(f"- **Interpretação:** {res['descricao']}")
             st.write("- **Legenda do Mapa de Calor:**")
             st.write("  - Azul: Texturas naturais (alta variabilidade)")
             st.write("  - Vermelho: Texturas artificiais (baixa variabilidade)")
