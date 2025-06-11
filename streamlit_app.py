@@ -524,7 +524,7 @@ if modo_analise in ["Manipulação por IA", "Análise Completa"]:
        "Tamanho do Bloco", 
        min_value=8, 
        max_value=32, 
-       value=16, 
+       value=20, 
        step=4,
        help="Tamanho do bloco para análise de textura (menor = mais sensível)"
    )
@@ -533,7 +533,7 @@ if modo_analise in ["Manipulação por IA", "Análise Completa"]:
        "Sensibilidade LBP", 
        min_value=0.1, 
        max_value=0.5, 
-       value=0.35, 
+       value=0.50, 
        step=0.05,
        help="Limiar para detecção de áreas suspeitas (menor = mais sensível)"
    )
