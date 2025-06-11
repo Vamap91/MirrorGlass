@@ -916,8 +916,14 @@ def exibir_resultados_textura(resultados):
             st.image(res["heatmap"], caption="Mapa de Calor LBP", use_column_width=True)
             
             st.write("### Detalhes da Análise")
-            st.write(f"- **Áreas suspeitas:** {res['percentual_suspeito']:.2f}% da imagem")
-            st.write(f"- **Interpretação:** {res['descricao']}")
+            percentual = res['percentual_suspeito']
+            if percentual > 60:
+                st.error(f"🚨 **ÁREAS SUSPEITAS: {percentual:.2f}% da imagem** - ALTO RISCO!")
+            elif percentual > 30:
+                st.warning(f"⚠️ **ÁREAS SUSPEITAS: {percentual:.2f}% da imagem** - ATENÇÃO!")
+            else:
+                st.write(f"- **Áreas suspeitas:** {percentual:.2f}% da imagem")
+             st.write(f"- **Interpretação:** {res['descricao']}")
             st.write("- **Legenda do Mapa de Calor:**")
             st.write("  - Azul: Texturas naturais (alta variabilidade)")
             st.write("  - Vermelho: Texturas artificiais (baixa variabilidade)")
